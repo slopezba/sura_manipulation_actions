@@ -125,7 +125,25 @@ private:
     const std::array<double, 5> & target,
     std::string & error_message,
     double & final_error_norm);
+  bool sendTrajectoryToController(
+    const ArmConfig & arm,
+    const trajectory_msgs::msg::JointTrajectory & trajectory,
+    const std::shared_ptr<GoalHandlePlanJointTrajectory> goal_handle,
+    const std::array<double, 5> & target,
+    std::string & error_message,
+    double & final_error_norm);
+  bool sendTrajectoryToTask(
+    const ArmConfig & arm,
+    const trajectory_msgs::msg::JointTrajectory & trajectory,
+    const std::shared_ptr<GoalHandlePlanJointTrajectory> goal_handle,
+    const std::array<double, 5> & target,
+    std::string & error_message,
+    double & final_error_norm);
+  trajectory_msgs::msg::JointTrajectory filterTrajectoryForTask(
+    const ArmConfig & arm,
+    const trajectory_msgs::msg::JointTrajectory & trajectory) const;
   bool switchControllersForArm(const ArmConfig & arm, std::string & error_message);
+  bool switchControllersForTaskExecution(std::string & error_message);
   bool startPendingExecution(std::string & message);
   bool cancelPendingOrActive(const std::string & message, std::string & response_message);
   void finishPendingActionCancel(
@@ -211,8 +229,12 @@ private:
   std::string right_velocity_controller_;
   std::string left_trajectory_controller_;
   std::string right_trajectory_controller_;
+  std::string task_priority_controller_;
   std::string execute_service_name_;
   std::string cancel_service_name_;
+  std::string execution_backend_;
+  std::string left_task_action_;
+  std::string right_task_action_;
   std::string planning_pipeline_namespace_;
   std::string planning_plugin_;
   std::string request_adapters_;
@@ -220,6 +242,8 @@ private:
   PredefinedPoseMap predefined_poses_;
   std::vector<std::string> left_joint_names_;
   std::vector<std::string> right_joint_names_;
+  std::vector<std::string> left_task_joint_names_;
+  std::vector<std::string> right_task_joint_names_;
   double default_planning_time_{5.0};
   double default_goal_tolerance_{0.02};
   double controller_wait_timeout_{5.0};

@@ -177,6 +177,19 @@ PlanJointTrajectoryActionServer::on_configure(const rclcpp_lifecycle::State &)
     *this,
     "right_trajectory_controller",
     std::string("alpha_right_joint_trajectory_controller"));
+  task_priority_controller_ = getOrDeclareParameter(
+    *this,
+    "task_priority_controller",
+    std::string("task_priority_controller"));
+  execution_backend_ = getOrDeclareParameter(*this, "execution_backend", std::string("controller"));
+  left_task_action_ = getOrDeclareParameter(
+    *this,
+    "left_task_action",
+    namespacedTopic("controller/task_priority_controller/task_priority/tasks/left_joint_trajectory/follow_joint_trajectory"));
+  right_task_action_ = getOrDeclareParameter(
+    *this,
+    "right_task_action",
+    namespacedTopic("controller/task_priority_controller/task_priority/tasks/right_joint_trajectory/follow_joint_trajectory"));
   execute_service_name_ = getOrDeclareParameter(
     *this,
     "execute_service_name",
@@ -229,6 +242,33 @@ PlanJointTrajectoryActionServer::on_configure(const rclcpp_lifecycle::State &)
       "cirtesub/alpha_right/axis_d",
       "cirtesub/alpha_right/axis_e",
     });
+  left_task_joint_names_ = getOrDeclareParameter<std::vector<std::string>>(
+    *this,
+    "left_task_joint_names",
+    {
+      "cirtesub/alpha_left/axis_b",
+      "cirtesub/alpha_left/axis_c",
+      "cirtesub/alpha_left/axis_d",
+      "cirtesub/alpha_left/axis_e",
+    });
+  right_task_joint_names_ = getOrDeclareParameter<std::vector<std::string>>(
+    *this,
+    "right_task_joint_names",
+    {
+      "cirtesub/alpha_right/axis_b",
+      "cirtesub/alpha_right/axis_c",
+      "cirtesub/alpha_right/axis_d",
+      "cirtesub/alpha_right/axis_e",
+    });
+
+  if (execution_backend_ != "controller" && execution_backend_ != "task") {
+    RCLCPP_ERROR(
+      get_logger(),
+      "Invalid execution_backend '%s'. Expected 'controller' or 'task'.",
+      execution_backend_.c_str());
+    cleanupResources();
+    return CallbackReturn::FAILURE;
+  }
 
   std::string error_message;
   if (!loadPredefinedPoses(error_message)) {
@@ -427,7 +467,10 @@ void PlanJointTrajectoryActionServer::planAcceptedGoal(
     default_goal_tolerance_;
 
   publishFeedback(goal_handle, arm, target, "planning", "Switching arm controllers for planning");
-  if (!switchControllersForArm(arm, error_message)) {
+  const bool switched = execution_backend_ == "task" ?
+    switchControllersForTaskExecution(error_message) :
+    switchControllersForArm(arm, error_message);
+  if (!switched) {
     result->success = false;
     result->message = error_message;
     goal_handle->abort(result);
@@ -981,6 +1024,22 @@ bool PlanJointTrajectoryActionServer::sendTrajectory(
   std::string & error_message,
   double & final_error_norm)
 {
+  if (execution_backend_ == "task") {
+    return sendTrajectoryToTask(
+      arm, trajectory, goal_handle, target, error_message, final_error_norm);
+  }
+  return sendTrajectoryToController(
+    arm, trajectory, goal_handle, target, error_message, final_error_norm);
+}
+
+bool PlanJointTrajectoryActionServer::sendTrajectoryToController(
+  const ArmConfig & arm,
+  const trajectory_msgs::msg::JointTrajectory & trajectory,
+  const std::shared_ptr<GoalHandlePlanJointTrajectory> goal_handle,
+  const std::array<double, kAlphaJointCount> & target,
+  std::string & error_message,
+  double & final_error_norm)
+{
   auto client =
     arm.canonical_name == "alpha_left" ? left_controller_client_ : right_controller_client_;
   if (!client->wait_for_action_server(std::chrono::duration<double>(controller_wait_timeout_))) {
@@ -1040,6 +1099,132 @@ bool PlanJointTrajectoryActionServer::sendTrajectory(
 
   error_message = "ROS shutdown during trajectory execution";
   return false;
+}
+
+bool PlanJointTrajectoryActionServer::sendTrajectoryToTask(
+  const ArmConfig & arm,
+  const trajectory_msgs::msg::JointTrajectory & trajectory,
+  const std::shared_ptr<GoalHandlePlanJointTrajectory> goal_handle,
+  const std::array<double, kAlphaJointCount> & target,
+  std::string & error_message,
+  double & final_error_norm)
+{
+  const std::string action_name =
+    arm.canonical_name == "alpha_left" ? left_task_action_ : right_task_action_;
+  auto client = rclcpp_action::create_client<FollowJointTrajectory>(this, action_name);
+  if (!client->wait_for_action_server(std::chrono::duration<double>(controller_wait_timeout_))) {
+    error_message = "Task trajectory action server is unavailable: " + action_name;
+    return false;
+  }
+
+  FollowJointTrajectory::Goal task_goal;
+  task_goal.trajectory = filterTrajectoryForTask(arm, trajectory);
+  task_goal.trajectory.header.stamp = now();
+  if (task_goal.trajectory.points.empty()) {
+    error_message = "Filtered task trajectory is empty";
+    return false;
+  }
+
+  auto goal_future = client->async_send_goal(task_goal);
+  if (goal_future.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+    error_message = "Timed out sending trajectory to task action: " + action_name;
+    return false;
+  }
+
+  active_controller_goal_ = goal_future.get();
+  if (!active_controller_goal_) {
+    error_message = "Task rejected trajectory goal: " + action_name;
+    return false;
+  }
+  active_controller_client_ = client;
+
+  rclcpp::Rate rate(std::max(1.0, execution_feedback_rate_));
+  auto result_future = client->async_get_result(active_controller_goal_);
+  while (rclcpp::ok()) {
+    if (stop_requested_ || goal_handle->is_canceling()) {
+      client->async_cancel_goal(active_controller_goal_);
+      error_message = "Task trajectory execution canceled";
+      return false;
+    }
+
+    publishFeedback(goal_handle, arm, target, "executing", "Executing trajectory through task priority");
+    if (result_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+      const auto wrapped_result = result_future.get();
+      moveit::core::RobotState current_state(planning_scene_monitor_->getRobotModel());
+      std::string state_error;
+      if (getCurrentState(current_state, state_error)) {
+        final_error_norm = computeErrorNorm(computeJointError(current_state, arm, target));
+      }
+      if (wrapped_result.code == rclcpp_action::ResultCode::SUCCEEDED) {
+        return true;
+      }
+      error_message =
+        "Task failed trajectory execution with result code " +
+        std::to_string(static_cast<int>(wrapped_result.code));
+      if (wrapped_result.result) {
+        error_message += " and task error code " +
+          std::to_string(wrapped_result.result->error_code) + ": " +
+          wrapped_result.result->error_string;
+      }
+      return false;
+    }
+
+    rate.sleep();
+  }
+
+  error_message = "ROS shutdown during task trajectory execution";
+  return false;
+}
+
+trajectory_msgs::msg::JointTrajectory PlanJointTrajectoryActionServer::filterTrajectoryForTask(
+  const ArmConfig & arm,
+  const trajectory_msgs::msg::JointTrajectory & trajectory) const
+{
+  const auto & task_joint_names =
+    arm.canonical_name == "alpha_left" ? left_task_joint_names_ : right_task_joint_names_;
+  if (task_joint_names.empty()) {
+    return trajectory;
+  }
+
+  trajectory_msgs::msg::JointTrajectory filtered;
+  filtered.header = trajectory.header;
+  filtered.joint_names = task_joint_names;
+
+  std::vector<size_t> indices;
+  indices.reserve(task_joint_names.size());
+  for (const auto & joint_name : task_joint_names) {
+    const auto it = std::find(trajectory.joint_names.begin(), trajectory.joint_names.end(), joint_name);
+    if (it == trajectory.joint_names.end()) {
+      return trajectory_msgs::msg::JointTrajectory();
+    }
+    indices.push_back(static_cast<size_t>(std::distance(trajectory.joint_names.begin(), it)));
+  }
+
+  filtered.points.reserve(trajectory.points.size());
+  for (const auto & point : trajectory.points) {
+    trajectory_msgs::msg::JointTrajectoryPoint filtered_point;
+    filtered_point.time_from_start = point.time_from_start;
+    filtered_point.positions.reserve(indices.size());
+    filtered_point.velocities.reserve(indices.size());
+    filtered_point.accelerations.reserve(indices.size());
+    filtered_point.effort.reserve(indices.size());
+    for (const auto index : indices) {
+      if (index < point.positions.size()) {
+        filtered_point.positions.push_back(point.positions[index]);
+      }
+      if (index < point.velocities.size()) {
+        filtered_point.velocities.push_back(point.velocities[index]);
+      }
+      if (index < point.accelerations.size()) {
+        filtered_point.accelerations.push_back(point.accelerations[index]);
+      }
+      if (index < point.effort.size()) {
+        filtered_point.effort.push_back(point.effort[index]);
+      }
+    }
+    filtered.points.push_back(filtered_point);
+  }
+  return filtered;
 }
 
 bool PlanJointTrajectoryActionServer::switchControllersForArm(
@@ -1144,6 +1329,103 @@ bool PlanJointTrajectoryActionServer::switchControllersForArm(
   const auto response = future.get();
   if (!response->ok) {
     error_message = "Controller manager rejected switch request for '" + arm.canonical_name + "'";
+    return false;
+  }
+  return true;
+}
+
+bool PlanJointTrajectoryActionServer::switchControllersForTaskExecution(std::string & error_message)
+{
+  if (!list_controllers_client_) {
+    error_message = "Controller list client is not initialized";
+    return false;
+  }
+  if (!switch_controller_client_) {
+    error_message = "Controller switch client is not initialized";
+    return false;
+  }
+  if (!list_controllers_client_->wait_for_service(
+      std::chrono::duration<double>(controller_switch_timeout_)))
+  {
+    error_message = "Controller list service is unavailable: " + controller_list_service_;
+    return false;
+  }
+  if (!switch_controller_client_->wait_for_service(
+      std::chrono::duration<double>(controller_switch_timeout_)))
+  {
+    error_message = "Controller switch service is unavailable: " + controller_switch_service_;
+    return false;
+  }
+
+  auto list_request = std::make_shared<ListControllers::Request>();
+  auto list_future = list_controllers_client_->async_send_request(list_request);
+  if (list_future.wait_for(std::chrono::duration<double>(controller_switch_timeout_ + 0.5)) !=
+    std::future_status::ready)
+  {
+    error_message = "Timed out listing controllers before switching to task execution";
+    return false;
+  }
+
+  const std::vector<std::string> controllers_to_deactivate{
+    left_velocity_controller_,
+    right_velocity_controller_,
+    left_trajectory_controller_,
+    right_trajectory_controller_,
+  };
+
+  bool task_priority_exists = false;
+  bool task_priority_active = false;
+  std::vector<std::string> active_to_deactivate;
+  const auto list_response = list_future.get();
+  for (const auto & controller : list_response->controller) {
+    if (controller.name == task_priority_controller_) {
+      task_priority_exists = true;
+      task_priority_active = controller.state == "active";
+      continue;
+    }
+    if (controller.state != "active") {
+      continue;
+    }
+    if (std::find(
+        controllers_to_deactivate.begin(),
+        controllers_to_deactivate.end(),
+        controller.name) != controllers_to_deactivate.end())
+    {
+      active_to_deactivate.push_back(controller.name);
+    }
+  }
+
+  if (!task_priority_exists) {
+    error_message = "Task priority controller '" + task_priority_controller_ + "' is not loaded";
+    return false;
+  }
+
+  auto request = std::make_shared<SwitchController::Request>();
+  if (!task_priority_active) {
+    request->activate_controllers.push_back(task_priority_controller_);
+  }
+  request->deactivate_controllers = active_to_deactivate;
+
+  if (request->activate_controllers.empty() && request->deactivate_controllers.empty()) {
+    RCLCPP_DEBUG(get_logger(), "Task priority controller is already active for trajectory execution");
+    return true;
+  }
+
+  request->strictness = SwitchController::Request::STRICT;
+  request->activate_asap = true;
+  request->timeout = secondsToDuration(controller_switch_timeout_);
+
+  auto future = switch_controller_client_->async_send_request(request);
+  if (future.wait_for(std::chrono::duration<double>(controller_switch_timeout_ + 0.5)) !=
+    std::future_status::ready)
+  {
+    error_message = "Timed out switching controllers for task trajectory execution";
+    return false;
+  }
+
+  const auto response = future.get();
+  if (!response->ok) {
+    error_message = "Controller manager rejected switch to task trajectory execution";
     return false;
   }
   return true;

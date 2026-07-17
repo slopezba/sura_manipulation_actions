@@ -23,6 +23,9 @@ def generate_launch_description():
     default_goal_tolerance = LaunchConfiguration("default_goal_tolerance")
     controller_wait_timeout = LaunchConfiguration("controller_wait_timeout")
     execution_feedback_rate = LaunchConfiguration("execution_feedback_rate")
+    execution_backend = LaunchConfiguration("execution_backend")
+    left_task_action = LaunchConfiguration("left_task_action")
+    right_task_action = LaunchConfiguration("right_task_action")
     current_state_timeout = LaunchConfiguration("current_state_timeout")
     planning_scene_publish_rate = LaunchConfiguration("planning_scene_publish_rate")
     predefined_poses_file = LaunchConfiguration("predefined_poses_file")
@@ -112,6 +115,21 @@ def generate_launch_description():
             DeclareLaunchArgument("default_goal_tolerance", default_value="0.02"),
             DeclareLaunchArgument("controller_wait_timeout", default_value="5.0"),
             DeclareLaunchArgument("execution_feedback_rate", default_value="10.0"),
+            DeclareLaunchArgument("execution_backend", default_value="controller"),
+            DeclareLaunchArgument(
+                "left_task_action",
+                default_value=(
+                    "/cirtesub/controller/task_priority/tasks/"
+                    "left_joint_trajectory/follow_joint_trajectory"
+                ),
+            ),
+            DeclareLaunchArgument(
+                "right_task_action",
+                default_value=(
+                    "/cirtesub/controller/task_priority/tasks/"
+                    "right_joint_trajectory/follow_joint_trajectory"
+                ),
+            ),
             DeclareLaunchArgument("current_state_timeout", default_value="2.0"),
             DeclareLaunchArgument("planning_scene_publish_rate", default_value="10.0"),
             DeclareLaunchArgument("predefined_poses_file", default_value=predefined_poses),
@@ -149,6 +167,9 @@ def generate_launch_description():
                             execution_feedback_rate,
                             value_type=float,
                         ),
+                        "execution_backend": execution_backend,
+                        "left_task_action": left_task_action,
+                        "right_task_action": right_task_action,
                         "current_state_timeout": ParameterValue(
                             current_state_timeout,
                             value_type=float,
