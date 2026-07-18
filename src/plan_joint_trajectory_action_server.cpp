@@ -26,7 +26,7 @@ namespace sura_manipulation_actions
 {
 namespace
 {
-constexpr std::size_t kAlphaJointCount = 5;
+constexpr std::size_t kAlphaJointCount = 4;
 
 template<typename T, typename NodeT>
 T getOrDeclareParameter(NodeT & node, const std::string & name, const T & default_value)
@@ -226,7 +226,6 @@ PlanJointTrajectoryActionServer::on_configure(const rclcpp_lifecycle::State &)
     *this,
     "left_joint_names",
     {
-      "cirtesub/alpha_left/axis_a",
       "cirtesub/alpha_left/axis_b",
       "cirtesub/alpha_left/axis_c",
       "cirtesub/alpha_left/axis_d",
@@ -236,7 +235,6 @@ PlanJointTrajectoryActionServer::on_configure(const rclcpp_lifecycle::State &)
     *this,
     "right_joint_names",
     {
-      "cirtesub/alpha_right/axis_a",
       "cirtesub/alpha_right/axis_b",
       "cirtesub/alpha_right/axis_c",
       "cirtesub/alpha_right/axis_d",
@@ -688,7 +686,7 @@ bool PlanJointTrajectoryActionServer::loadPredefinedPoses(std::string & error_me
         if (!positions.IsSequence() || positions.size() != kAlphaJointCount) {
           error_message =
             "Predefined pose '" + pose_name + "' for arm '" + arm_name +
-            "' must contain exactly 5 joint positions";
+            "' must contain exactly 4 joint positions";
           return false;
         }
 
@@ -770,7 +768,7 @@ bool PlanJointTrajectoryActionServer::validateGoal(
   }
   arm = *resolved_arm;
   if (arm.joint_names.size() != kAlphaJointCount) {
-    error_message = "Configured joint list for " + arm.canonical_name + " must contain exactly 5 arm joints";
+    error_message = "Configured joint list for " + arm.canonical_name + " must contain exactly 4 arm joints";
     return false;
   }
 

@@ -66,7 +66,7 @@ private:
   };
 
   using PredefinedPoseMap =
-    std::unordered_map<std::string, std::unordered_map<std::string, std::array<double, 5>>>;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::array<double, 4>>>;
 
   CallbackReturn on_configure(const rclcpp_lifecycle::State & previous_state) override;
   CallbackReturn on_activate(const rclcpp_lifecycle::State & previous_state) override;
@@ -96,21 +96,21 @@ private:
   bool validateGoal(
     const PlanJointTrajectory::Goal & goal,
     ArmConfig & arm,
-    std::array<double, 5> & target,
+    std::array<double, 4> & target,
     std::string & error_message) const;
   bool getCurrentState(moveit::core::RobotState & state, std::string & error_message) const;
   bool isStateCollisionFree(
     const moveit::core::RobotState & state,
     CollisionSummary & summary) const;
   CollisionSummary collisionSummary(const moveit::core::RobotState & state) const;
-  std::array<double, 5> computeJointError(
+  std::array<double, 4> computeJointError(
     const moveit::core::RobotState & state,
     const ArmConfig & arm,
-    const std::array<double, 5> & target) const;
-  double computeErrorNorm(const std::array<double, 5> & error) const;
+    const std::array<double, 4> & target) const;
+  double computeErrorNorm(const std::array<double, 4> & error) const;
   bool planTrajectory(
     const ArmConfig & arm,
-    const std::array<double, 5> & target,
+    const std::array<double, 4> & target,
     double planning_time,
     double goal_tolerance,
     robot_trajectory::RobotTrajectoryPtr & trajectory,
@@ -122,21 +122,21 @@ private:
     const ArmConfig & arm,
     const trajectory_msgs::msg::JointTrajectory & trajectory,
     const std::shared_ptr<GoalHandlePlanJointTrajectory> goal_handle,
-    const std::array<double, 5> & target,
+    const std::array<double, 4> & target,
     std::string & error_message,
     double & final_error_norm);
   bool sendTrajectoryToController(
     const ArmConfig & arm,
     const trajectory_msgs::msg::JointTrajectory & trajectory,
     const std::shared_ptr<GoalHandlePlanJointTrajectory> goal_handle,
-    const std::array<double, 5> & target,
+    const std::array<double, 4> & target,
     std::string & error_message,
     double & final_error_norm);
   bool sendTrajectoryToTask(
     const ArmConfig & arm,
     const trajectory_msgs::msg::JointTrajectory & trajectory,
     const std::shared_ptr<GoalHandlePlanJointTrajectory> goal_handle,
-    const std::array<double, 5> & target,
+    const std::array<double, 4> & target,
     std::string & error_message,
     double & final_error_norm);
   trajectory_msgs::msg::JointTrajectory filterTrajectoryForTask(
@@ -152,7 +152,7 @@ private:
   bool publishFeedback(
     const std::shared_ptr<GoalHandlePlanJointTrajectory> goal_handle,
     const ArmConfig & arm,
-    const std::array<double, 5> & target,
+    const std::array<double, 4> & target,
     const std::string & state,
     const std::string & message) const;
   void publishDisplayTrajectory(const robot_trajectory::RobotTrajectory & trajectory) const;
@@ -205,7 +205,7 @@ private:
   GoalHandleFollowJointTrajectory::SharedPtr active_controller_goal_;
   std::shared_ptr<GoalHandlePlanJointTrajectory> pending_goal_handle_;
   ArmConfig pending_arm_;
-  std::array<double, 5> pending_target_{};
+  std::array<double, 4> pending_target_{};
   robot_trajectory::RobotTrajectoryPtr pending_robot_trajectory_;
   trajectory_msgs::msg::JointTrajectory pending_joint_trajectory_;
   std::string pending_plan_id_;

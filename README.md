@@ -2,7 +2,7 @@
 
 Paquete ROS 2 para planificar y ejecutar trayectorias articulares de los manipuladores Alpha de SURA/Cirtesub usando MoveIt 2 y `ros2_control`.
 
-El nodo principal es un `LifecycleNode` que expone una action propia, `PlanJointTrajectory`, para mandar una pose predefinida o una posicion objetivo de 5 articulaciones a un brazo. El servidor:
+El nodo principal es un `LifecycleNode` que expone una action propia, `PlanJointTrajectory`, para mandar una pose predefinida o una posicion objetivo de 4 articulaciones a un brazo. El servidor:
 
 - Carga el modelo URDF/SRDF y la configuracion de MoveIt.
 - Lee el estado actual desde `/cirtesub/alpha/joint_states`.
@@ -44,6 +44,11 @@ ros2 launch sura_manipulation_actions manipulation_actions.launch.py \
   default_goal_tolerance:=0.02 \
   predefined_poses_file:=/ruta/a/predefined_poses.yaml \
   use_sim_time:=false
+```
+
+O también puedes lanzarlo como:
+```bash
+ros2 launch sura_manipulation_actions manipulation_actions.launch.py execution_backend:=task
 ```
 
 Por defecto usa la descripcion de `cirtesub_description`:
@@ -106,7 +111,7 @@ Goal:
 ```text
 string arm_name
 string predefined_pose
-float64[5] joint_positions
+float64[4] joint_positions
 float64 planning_time
 float64 goal_tolerance
 bool execute
@@ -127,7 +132,7 @@ string state
 string message
 float64 closest_distance
 string closest_object
-float64[5] joint_error
+float64[4] joint_error
 ```
 
 `arm_name` acepta:
@@ -137,10 +142,9 @@ float64[5] joint_error
 
 `predefined_pose` es opcional. Si no esta vacio, tiene prioridad sobre `joint_positions` y se busca en el YAML de poses predefinidas para el brazo indicado. El nombre se normaliza quitando espacios y pasando a minusculas.
 
-`joint_positions` son 5 posiciones articulares en radianes, en este orden por defecto:
+`joint_positions` son 4 posiciones articulares en radianes. El gripper (`axis_a`) queda fuera de la planificacion y se controla por separado. Orden por defecto:
 
 ```text
-cirtesub/alpha_left/axis_a
 cirtesub/alpha_left/axis_b
 cirtesub/alpha_left/axis_c
 cirtesub/alpha_left/axis_d
@@ -150,7 +154,6 @@ cirtesub/alpha_left/axis_e
 o para el derecho:
 
 ```text
-cirtesub/alpha_right/axis_a
 cirtesub/alpha_right/axis_b
 cirtesub/alpha_right/axis_c
 cirtesub/alpha_right/axis_d
@@ -170,16 +173,16 @@ Formato:
 ```yaml
 predefined_poses:
   alpha_left:
-    home: [0.0, 0.0, 0.0, 0.0, 0.0]
-    extend: [0.0, 0.3, -0.4, 0.2, 0.0]
-    fold: [0.0, -0.5, 0.8, -0.3, 0.0]
-    unfold: [0.0, 0.2, -0.2, 0.1, 0.0]
+    home: [0.0, 0.0, 0.0, 0.0]
+    extend: [0.3, -0.4, 0.2, 0.0]
+    fold: [-0.5, 0.8, -0.3, 0.0]
+    unfold: [0.2, -0.2, 0.1, 0.0]
 
   alpha_right:
-    home: [0.0, 0.0, 0.0, 0.0, 0.0]
-    extend: [0.0, -0.3, 0.4, -0.2, 0.0]
-    fold: [0.0, 0.5, -0.8, 0.3, 0.0]
-    unfold: [0.0, -0.2, 0.2, -0.1, 0.0]
+    home: [0.0, 0.0, 0.0, 0.0]
+    extend: [-0.3, 0.4, -0.2, 0.0]
+    fold: [0.5, -0.8, 0.3, 0.0]
+    unfold: [-0.2, 0.2, -0.1, 0.0]
 ```
 
 Tambien puedes pasar otro YAML desde launch:
@@ -199,7 +202,7 @@ Planificar una pose predefinida, publicar en RViz y esperar confirmacion antes d
 ros2 action send_goal --feedback \
   /cirtesub/manipulation/plan_joint_trajectory \
   sura_manipulation_actions/action/PlanJointTrajectory \
-  "{arm_name: left, predefined_pose: home, joint_positions: [0, 0, 0, 0, 0], planning_time: 5.0, goal_tolerance: 0.02, execute: false}"
+  "{arm_name: left, predefined_pose: home, joint_positions: [0, 0, 0, 0], planning_time: 5.0, goal_tolerance: 0.02, execute: false}"
 ```
 
 Planificar con posiciones manuales:
@@ -208,7 +211,7 @@ Planificar con posiciones manuales:
 ros2 action send_goal --feedback \
   /cirtesub/manipulation/plan_joint_trajectory \
   sura_manipulation_actions/action/PlanJointTrajectory \
-  "{arm_name: left, predefined_pose: '', joint_positions: [0.0, 0.2, -0.3, 0.1, 0.0], planning_time: 5.0, goal_tolerance: 0.02, execute: false}"
+  "{arm_name: left, predefined_pose: '', joint_positions: [0.2, -0.3, 0.1, 0.0], planning_time: 5.0, goal_tolerance: 0.02, execute: false}"
 ```
 
 Cuando la action quede en `waiting_for_execute`, ejecuta la trayectoria pendiente:
@@ -225,7 +228,7 @@ Planificar y ejecutar directamente:
 ros2 action send_goal --feedback \
   /cirtesub/manipulation/plan_joint_trajectory \
   sura_manipulation_actions/action/PlanJointTrajectory \
-  "{arm_name: right, predefined_pose: extend, joint_positions: [0, 0, 0, 0, 0], planning_time: 5.0, goal_tolerance: 0.02, execute: true}"
+  "{arm_name: right, predefined_pose: extend, joint_positions: [0, 0, 0, 0], planning_time: 5.0, goal_tolerance: 0.02, execute: true}"
 ```
 
 Cancelar una trayectoria pendiente o activa:
@@ -281,8 +284,10 @@ Controladores esperados por defecto:
 
 ```text
 alpha_left_forward_velocity_controller
+alpha_left_gripper_controller
 alpha_left_joint_trajectory_controller
 alpha_right_forward_velocity_controller
+alpha_right_gripper_controller
 alpha_right_joint_trajectory_controller
 ```
 
