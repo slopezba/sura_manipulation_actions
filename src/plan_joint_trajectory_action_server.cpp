@@ -1,5 +1,7 @@
 #include "sura_manipulation_actions/plan_joint_trajectory_action_server.hpp"
 
+#include "controller_manager_msgs/srv/configure_controller.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -148,19 +150,24 @@ PlanJointTrajectoryActionServer::on_configure(const rclcpp_lifecycle::State &)
   left_controller_action_ = getOrDeclareParameter(
     *this,
     "left_controller_action",
-    namespacedTopic("controller/alpha_left_joint_trajectory_controller/follow_joint_trajectory"));
+    namespacedTopic("alpha/controller/alpha_left_joint_trajectory_controller/follow_joint_trajectory"));
   right_controller_action_ = getOrDeclareParameter(
     *this,
     "right_controller_action",
-    namespacedTopic("controller/alpha_right_joint_trajectory_controller/follow_joint_trajectory"));
+    namespacedTopic("alpha/controller/alpha_right_joint_trajectory_controller/follow_joint_trajectory"));
   controller_list_service_ = getOrDeclareParameter(
     *this,
     "controller_list_service",
-    namespacedTopic("controller/controller_manager/list_controllers"));
+    namespacedTopic("alpha/controller/controller_manager/list_controllers"));
   controller_switch_service_ = getOrDeclareParameter(
     *this,
     "controller_switch_service",
-    namespacedTopic("controller/controller_manager/switch_controller"));
+    namespacedTopic("alpha/controller/controller_manager/switch_controller"));
+  vehicle_controller_list_service_ = getOrDeclareParameter(
+    *this, "vehicle_controller_list_service", namespacedTopic("controller/controller_manager/list_controllers"));
+  vehicle_controller_switch_service_ = getOrDeclareParameter(
+    *this, "vehicle_controller_switch_service", namespacedTopic("controller/controller_manager/switch_controller"));
+  body_velocity_controller_ = getOrDeclareParameter(*this, "body_velocity_controller", std::string("body_velocity"));
   left_velocity_controller_ = getOrDeclareParameter(
     *this,
     "left_velocity_controller",
@@ -185,11 +192,11 @@ PlanJointTrajectoryActionServer::on_configure(const rclcpp_lifecycle::State &)
   left_task_action_ = getOrDeclareParameter(
     *this,
     "left_task_action",
-    namespacedTopic("controller/task_priority_controller/task_priority/tasks/left_joint_trajectory/follow_joint_trajectory"));
+    namespacedTopic("controller/task_priority/tasks/left_joint_trajectory/follow_joint_trajectory"));
   right_task_action_ = getOrDeclareParameter(
     *this,
     "right_task_action",
-    namespacedTopic("controller/task_priority_controller/task_priority/tasks/right_joint_trajectory/follow_joint_trajectory"));
+    namespacedTopic("controller/task_priority/tasks/right_joint_trajectory/follow_joint_trajectory"));
   execute_service_name_ = getOrDeclareParameter(
     *this,
     "execute_service_name",
@@ -287,6 +294,8 @@ PlanJointTrajectoryActionServer::on_configure(const rclcpp_lifecycle::State &)
     rclcpp_action::create_client<FollowJointTrajectory>(this, right_controller_action_);
   list_controllers_client_ = create_client<ListControllers>(controller_list_service_);
   switch_controller_client_ = create_client<SwitchController>(controller_switch_service_);
+  vehicle_list_client_ = create_client<ListControllers>(vehicle_controller_list_service_);
+  vehicle_switch_client_ = create_client<SwitchController>(vehicle_controller_switch_service_);
 
   action_server_ = rclcpp_action::create_server<PlanJointTrajectory>(
     this,
@@ -1276,8 +1285,16 @@ bool PlanJointTrajectoryActionServer::switchControllersForArm(
   bool trajectory_active = false;
   bool velocity_exists = false;
   bool velocity_active = false;
+  std::vector<std::string> conflicting_controllers;
   const auto list_response = list_future.get();
   for (const auto & controller : list_response->controller) {
+    const std::string prefix = arm.canonical_name + "_";
+    if (controller.state == "active" && controller.name != trajectory_controller &&
+        (controller.name == task_priority_controller_ ||
+         controller.name == prefix + "forward_position_controller" ||
+         controller.name == prefix + "cartesian_velocity_controller")) {
+      conflicting_controllers.push_back(controller.name);
+    }
     if (controller.name == trajectory_controller) {
       trajectory_exists = true;
       trajectory_active = controller.state == "active";
@@ -1300,6 +1317,7 @@ bool PlanJointTrajectoryActionServer::switchControllersForArm(
   if (!trajectory_active) {
     request->activate_controllers.push_back(trajectory_controller);
   }
+  request->deactivate_controllers = conflicting_controllers;
   if (velocity_active) {
     request->deactivate_controllers.push_back(velocity_controller);
   }
@@ -1369,16 +1387,20 @@ bool PlanJointTrajectoryActionServer::switchControllersForTaskExecution(std::str
     right_velocity_controller_,
     left_trajectory_controller_,
     right_trajectory_controller_,
+    "alpha_left_forward_position_controller", "alpha_right_forward_position_controller",
+    "alpha_left_cartesian_velocity_controller", "alpha_right_cartesian_velocity_controller",
   };
 
   bool task_priority_exists = false;
   bool task_priority_active = false;
+  bool task_priority_unconfigured = false;
   std::vector<std::string> active_to_deactivate;
   const auto list_response = list_future.get();
   for (const auto & controller : list_response->controller) {
     if (controller.name == task_priority_controller_) {
       task_priority_exists = true;
       task_priority_active = controller.state == "active";
+      task_priority_unconfigured = controller.state == "unconfigured";
       continue;
     }
     if (controller.state != "active") {
@@ -1398,6 +1420,78 @@ bool PlanJointTrajectoryActionServer::switchControllersForTaskExecution(std::str
     return false;
   }
 
+  if (task_priority_unconfigured) {
+    const auto manager_prefix = controller_switch_service_.substr(0, controller_switch_service_.rfind('/'));
+    auto configure_client = create_client<controller_manager_msgs::srv::ConfigureController>(
+      manager_prefix + "/configure_controller");
+    if (!configure_client->wait_for_service(std::chrono::duration<double>(controller_switch_timeout_))) {
+      error_message = "Alpha configure_controller service is unavailable";
+      return false;
+    }
+    auto configure_request = std::make_shared<controller_manager_msgs::srv::ConfigureController::Request>();
+    configure_request->name = task_priority_controller_;
+    auto configured = configure_client->async_send_request(configure_request);
+    if (configured.wait_for(std::chrono::duration<double>(controller_wait_timeout_)) !=
+        std::future_status::ready || !configured.get()->ok) {
+      error_message = "Failed to configure task priority controller";
+      return false;
+    }
+  }
+  if (!vehicle_list_client_->wait_for_service(std::chrono::duration<double>(controller_switch_timeout_)) ||
+      !vehicle_switch_client_->wait_for_service(std::chrono::duration<double>(controller_switch_timeout_))) {
+    error_message = "Vehicle controller manager is unavailable";
+    return false;
+  }
+  auto vehicle_future = vehicle_list_client_->async_send_request(std::make_shared<ListControllers::Request>());
+  if (vehicle_future.wait_for(std::chrono::duration<double>(controller_switch_timeout_ + 0.5)) !=
+      std::future_status::ready) {
+    error_message = "Timed out listing vehicle controllers";
+    return false;
+  }
+  std::vector<std::string> vehicle_deactivate;
+  bool body_velocity_exists = false;
+  bool body_velocity_active = false;
+  const auto vehicle_response = vehicle_future.get();
+  for (const auto & controller : vehicle_response->controller) {
+    if (controller.name == body_velocity_controller_) {
+      body_velocity_exists = true;
+      body_velocity_active = controller.state == "active";
+    } else if (controller.state == "active" &&
+        (controller.name == "position_hold" || controller.name == "stabilize" ||
+         controller.name == "depth_hold" || controller.name == "mpc_4dof")) {
+      vehicle_deactivate.push_back(controller.name);
+    }
+  }
+  if (!body_velocity_exists) {
+    error_message = "Vehicle body_velocity controller is not loaded";
+    return false;
+  }
+  const auto switch_vehicle = [this](const std::vector<std::string> & activate,
+      const std::vector<std::string> & deactivate) {
+      if (activate.empty() && deactivate.empty()) {return true;}
+      auto change = std::make_shared<SwitchController::Request>();
+      change->activate_controllers = activate;
+      change->deactivate_controllers = deactivate;
+      change->strictness = SwitchController::Request::STRICT;
+      change->activate_asap = true;
+      change->timeout = secondsToDuration(controller_switch_timeout_);
+      auto result = vehicle_switch_client_->async_send_request(change);
+      return result.wait_for(std::chrono::duration<double>(controller_switch_timeout_ + 0.5)) ==
+             std::future_status::ready && result.get()->ok;
+    };
+  const std::vector<std::string> vehicle_activate = body_velocity_active ?
+    std::vector<std::string>{} : std::vector<std::string>{body_velocity_controller_};
+  if (!switch_vehicle(vehicle_activate, vehicle_deactivate)) {
+    error_message = "Vehicle controller manager rejected task execution setup";
+    return false;
+  }
+  bool committed = false;
+  const auto rollback = std::shared_ptr<void>(nullptr, [&](void *) {
+      if (!committed && !switch_vehicle(vehicle_deactivate, vehicle_activate)) {
+        RCLCPP_ERROR(get_logger(), "Failed to restore vehicle controllers after Alpha activation failure");
+      }
+    });
+
   auto request = std::make_shared<SwitchController::Request>();
   if (!task_priority_active) {
     request->activate_controllers.push_back(task_priority_controller_);
@@ -1406,6 +1500,7 @@ bool PlanJointTrajectoryActionServer::switchControllersForTaskExecution(std::str
 
   if (request->activate_controllers.empty() && request->deactivate_controllers.empty()) {
     RCLCPP_DEBUG(get_logger(), "Task priority controller is already active for trajectory execution");
+    committed = true;
     return true;
   }
 
@@ -1417,7 +1512,19 @@ bool PlanJointTrajectoryActionServer::switchControllersForTaskExecution(std::str
   if (future.wait_for(std::chrono::duration<double>(controller_switch_timeout_ + 0.5)) !=
     std::future_status::ready)
   {
+    // A timed-out request may still complete later. Confirm the producer is
+    // stopped before restoring vehicle controllers from the previous mode.
+    auto stop = std::make_shared<SwitchController::Request>();
+    stop->deactivate_controllers = {task_priority_controller_};
+    stop->strictness = SwitchController::Request::BEST_EFFORT;
+    stop->timeout = secondsToDuration(controller_switch_timeout_);
+    auto stopped = switch_controller_client_->async_send_request(stop);
     error_message = "Timed out switching controllers for task trajectory execution";
+    if (stopped.wait_for(std::chrono::duration<double>(controller_switch_timeout_ + 0.5)) !=
+        std::future_status::ready || !stopped.get()->ok) {
+      committed = true;
+      error_message += "; could not confirm Alpha stopped, vehicle rollback skipped";
+    }
     return false;
   }
 
@@ -1426,6 +1533,7 @@ bool PlanJointTrajectoryActionServer::switchControllersForTaskExecution(std::str
     error_message = "Controller manager rejected switch to task trajectory execution";
     return false;
   }
+  committed = true;
   return true;
 }
 
@@ -1741,6 +1849,8 @@ void PlanJointTrajectoryActionServer::cleanupResources()
   right_controller_client_.reset();
   list_controllers_client_.reset();
   switch_controller_client_.reset();
+  vehicle_list_client_.reset();
+  vehicle_switch_client_.reset();
   execute_service_.reset();
   cancel_service_.reset();
   action_server_.reset();
@@ -1782,6 +1892,7 @@ std::string PlanJointTrajectoryActionServer::namespacedMoveItTopic(
 
 }  // namespace sura_manipulation_actions
 
+#ifndef SURA_MANIPULATION_ACTIONS_NO_MAIN
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
@@ -1792,3 +1903,5 @@ int main(int argc, char ** argv)
   rclcpp::shutdown();
   return 0;
 }
+
+#endif

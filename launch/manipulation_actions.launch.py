@@ -182,6 +182,51 @@ def generate_launch_description():
                     },
                 ],
             ),
+            LifecycleNode(
+                package="sura_manipulation_actions",
+                executable="plan_bimanual_joint_trajectory_action_server",
+                name="plan_bimanual_joint_trajectory_lifecycle_action_server",
+                namespace="",
+                output="screen",
+                parameters=[
+                    robot_description,
+                    robot_description_semantic,
+                    planning_pipelines,
+                    ompl_planning,
+                    joint_limits,
+                    kinematics,
+                    {
+                        "robot_namespace": robot_namespace,
+                        "moveit_namespace": moveit_namespace,
+                        "use_sim_time": use_sim_time,
+                        "default_planning_time": ParameterValue(
+                            default_planning_time,
+                            value_type=float,
+                        ),
+                        "default_goal_tolerance": ParameterValue(
+                            default_goal_tolerance,
+                            value_type=float,
+                        ),
+                        "controller_wait_timeout": ParameterValue(
+                            controller_wait_timeout,
+                            value_type=float,
+                        ),
+                        "execution_feedback_rate": ParameterValue(
+                            execution_feedback_rate,
+                            value_type=float,
+                        ),
+                        "current_state_timeout": ParameterValue(
+                            current_state_timeout,
+                            value_type=float,
+                        ),
+                        "planning_scene_publish_rate": ParameterValue(
+                            planning_scene_publish_rate,
+                            value_type=float,
+                        ),
+                        "group_name": "dual_alpha",
+                    },
+                ],
+            ),
             Node(
                 package="rviz2",
                 executable="rviz2",

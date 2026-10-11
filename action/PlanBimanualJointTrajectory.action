@@ -1,0 +1,15 @@
+string[] joint_names
+float64[] joint_positions
+float64 planning_time
+float64 goal_tolerance
+bool execute
+---
+bool success
+string message
+trajectory_msgs/JointTrajectory trajectory
+float64 final_error_norm
+---
+string state
+string message
+float64 closest_distance
+string closest_object

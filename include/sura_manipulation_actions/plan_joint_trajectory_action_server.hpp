@@ -50,6 +50,8 @@ public:
   ~PlanJointTrajectoryActionServer() override;
 
 private:
+  friend class ControllerSwitchTest;
+
   struct ArmConfig
   {
     std::string canonical_name;
@@ -182,6 +184,8 @@ private:
   std::shared_ptr<rclcpp_action::Client<FollowJointTrajectory>> right_controller_client_;
   rclcpp::Client<ListControllers>::SharedPtr list_controllers_client_;
   rclcpp::Client<SwitchController>::SharedPtr switch_controller_client_;
+  rclcpp::Client<ListControllers>::SharedPtr vehicle_list_client_;
+  rclcpp::Client<SwitchController>::SharedPtr vehicle_switch_client_;
   rclcpp::Service<Trigger>::SharedPtr execute_service_;
   rclcpp::Service<Trigger>::SharedPtr cancel_service_;
   rclcpp::Publisher<moveit_msgs::msg::DisplayTrajectory>::SharedPtr display_trajectory_pub_;
@@ -225,6 +229,9 @@ private:
   std::string right_controller_action_;
   std::string controller_list_service_;
   std::string controller_switch_service_;
+  std::string vehicle_controller_list_service_;
+  std::string vehicle_controller_switch_service_;
+  std::string body_velocity_controller_;
   std::string left_velocity_controller_;
   std::string right_velocity_controller_;
   std::string left_trajectory_controller_;

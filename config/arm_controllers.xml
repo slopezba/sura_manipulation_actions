@@ -24,7 +24,7 @@
        <curve name="/cirtesub/alpha/joint_states/cirtesub/alpha_left/axis_c/velocity" color="#f14cc1"/>
        <curve name="/cirtesub/alpha/joint_states/cirtesub/alpha_left/axis_d/velocity" color="#9467bd"/>
        <curve name="/cirtesub/alpha/joint_states/cirtesub/alpha_left/axis_e/velocity" color="#17becf"/>
-       <curve name="/cirtesub/controller/alpha_left_forward_velocity_controller/commands/data[4]" color="#bcbd22"/>
+       <curve name="/cirtesub/alpha/controller/alpha_left_forward_velocity_controller/commands/data[4]" color="#bcbd22"/>
       </plot>
      </DockArea>
      <DockArea name="...">
@@ -66,7 +66,7 @@
    <max_array_size value="100"/>
    <boolean_strings_to_number value="true"/>
    <remove_suffix_from_strings value="true"/>
-   <selected_topics value="/cirtesub/alpha/joint_states;/cirtesub/controller/alpha_left_cartesian_velocity_controller/end_effector_pose;/cirtesub/controller/alpha_left_cartesian_velocity_controller/twist;/cirtesub/controller/alpha_left_forward_velocity_controller/commands;/cirtesub/controller/alpha_right_cartesian_velocity_controller/end_effector_pose;/cirtesub/controller/alpha_right_cartesian_velocity_controller/twist"/>
+   <selected_topics value="/cirtesub/alpha/joint_states;/cirtesub/alpha/controller/alpha_left_cartesian_velocity_controller/end_effector_pose;/cirtesub/alpha/controller/alpha_left_cartesian_velocity_controller/twist;/cirtesub/alpha/controller/alpha_left_forward_velocity_controller/commands;/cirtesub/alpha/controller/alpha_right_cartesian_velocity_controller/end_effector_pose;/cirtesub/alpha/controller/alpha_right_cartesian_velocity_controller/twist"/>
   </plugin>
   <plugin ID="UDP Server"/>
   <plugin ID="WebSocket Server"/>

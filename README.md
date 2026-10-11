@@ -51,6 +51,32 @@ O también puedes lanzarlo como:
 ros2 launch sura_manipulation_actions manipulation_actions.launch.py execution_backend:=task
 ```
 
+## Hybrid Planning
+
+Para usar la arquitectura Hybrid Planning de MoveIt:
+
+```bash
+ros2 launch sura_manipulation_actions manipulation_hybrid_planning_actions.launch.py
+```
+
+La action expuesta es:
+
+```text
+/cirtesub/manipulation/hybrid_plan_joint_trajectory
+```
+
+Usa el mismo tipo `sura_manipulation_actions/action/PlanJointTrajectory`. En este modo Hybrid Planning planifica y ejecuta online mediante el planner global y local de MoveIt, por lo que el campo `execute` se acepta por compatibilidad pero no deja una trayectoria pendiente.
+
+```bash
+ros2 launch sura_manipulation_actions manipulation_hybrid_planning_actions.launch.py execution_backend:=controller
+ros2 launch sura_manipulation_actions manipulation_hybrid_planning_actions.launch.py execution_backend:=task
+```
+
+`execution_backend:=controller` publica la solucion local hacia los `JointTrajectoryController`; `execution_backend:=task` la publica hacia las tareas `left_joint_trajectory` y `right_joint_trajectory` del task priority controller.
+
+El servidor hybrid queda disponible al arrancar el launch; no necesita `ros2 lifecycle set configure/activate`.
+Este modo no cambia controladores automaticamente; deja activo antes el JTC o task priority que quieras usar. Para evitar bloqueos durante pruebas, el wrapper cancela el goal si MoveIt Hybrid Planning no devuelve resultado antes de `hybrid_result_timeout`.
+
 Por defecto usa la descripcion de `cirtesub_description`:
 
 - URDF: `urdf/cirtesub_dual_alpha.urdf.xacro`
@@ -284,18 +310,18 @@ Controladores esperados por defecto:
 
 ```text
 alpha_left_forward_velocity_controller
-alpha_left_gripper_controller
+alpha_left_gripper_velocity_controller
 alpha_left_joint_trajectory_controller
 alpha_right_forward_velocity_controller
-alpha_right_gripper_controller
+alpha_right_gripper_velocity_controller
 alpha_right_joint_trajectory_controller
 ```
 
 Action servers de trayectoria esperados:
 
 ```text
-/cirtesub/controller/alpha_left_joint_trajectory_controller/follow_joint_trajectory
-/cirtesub/controller/alpha_right_joint_trajectory_controller/follow_joint_trajectory
+/cirtesub/alpha/controller/alpha_left_joint_trajectory_controller/follow_joint_trajectory
+/cirtesub/alpha/controller/alpha_right_joint_trajectory_controller/follow_joint_trajectory
 ```
 
 El servidor cambia automaticamente el brazo seleccionado a modo trayectoria: activa el `joint_trajectory_controller` y desactiva el `forward_velocity_controller` si estaba activo.
