@@ -577,7 +577,7 @@ void PlanCartesianTrajectoryActionServer::finish(
   result->success = success;
   result->message = message;
   result->joint_trajectory = pending->plan.joint_trajectory;
-  result->path = pending->views.follower_path;
+  result->path = pending->views.arm_b_path;
   result->desired_path = pending->views.desired_relative_path;
   {std::lock_guard<std::mutex> lock(mutex_);
     if (pending_ == pending || !pending_) {pending_.reset(); stage_ = Stage::Idle;}}

@@ -29,9 +29,6 @@ using timing::polynomial;
 using timing::extrema;
 using timing::validMessage;
 using timing::interpolateSegment;
-constexpr double kPi = 3.14159265358979323846;
-
-
 bool growSampleCount(double requested, int cap, int & count, std::string & error)
 {
   if (!std::isfinite(requested) || requested < 0.0 || requested > cap) {
@@ -130,10 +127,10 @@ struct Waypoint
 
 struct Evaluation
 {
-  Eigen::Isometry3d leader = Eigen::Isometry3d::Identity();
-  Eigen::Isometry3d follower = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d arm_a = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d arm_b = Eigen::Isometry3d::Identity();
   Eigen::Isometry3d relative = Eigen::Isometry3d::Identity();
-  Eigen::MatrixXd leader_jacobian;
+  Eigen::MatrixXd arm_a_jacobian;
   Eigen::MatrixXd relative_jacobian;
 };
 
@@ -143,11 +140,11 @@ public:
   PlanningContext(
     const planning_scene::PlanningSceneConstPtr & scene_input,
     const moveit::core::RobotState & start_input,
-    const Arm & leader_input, const Arm & follower_input, const Pair & pair_input,
+    const Arm & arm_a_input, const Arm & arm_b_input, const Pair & pair_input,
     const GoalSpec & goal_input, const Options & options_input,
     const BimanualCartesianPlanner::CancelCheck & cancel_input,
     const BimanualCartesianPlanner::Progress & progress_input, bool single_arm_input = false)
-  : scene(scene_input), start(start_input), leader(leader_input), follower(follower_input),
+  : scene(scene_input), start(start_input), arm_a(arm_a_input), arm_b(arm_b_input),
     pair(pair_input), goal(goal_input), options(options_input), canceled(cancel_input),
     feedback(progress_input), single_arm(single_arm_input), deadline(std::chrono::steady_clock::now() +
     std::chrono::duration_cast<std::chrono::steady_clock::duration>(
@@ -159,26 +156,26 @@ public:
       error = "Planning scene and initial state must use the same robot model";
       return false;
     }
-    if (!single_arm && (leader.name == follower.name || leader.group_name == follower.group_name)) {
-      error = "Leader and follower must be distinct manipulators";
+    if (!single_arm && (arm_a.name == arm_b.name || arm_a.group_name == arm_b.group_name)) {
+      error = "Arm A and arm B must be distinct manipulators";
       return false;
     }
     const auto model = start.getRobotModel();
     if (!Eigen::Map<const Eigen::VectorXd>(start.getVariablePositions(),
       static_cast<Eigen::Index>(start.getVariableCount())).allFinite())
     {error = "Initial robot state contains non-finite joint positions"; return false;}
-    const auto * leader_group = single_arm ? nullptr : model->getJointModelGroup(leader.group_name);
-    const auto * follower_group = model->getJointModelGroup(follower.group_name);
+    const auto * arm_a_group = single_arm ? nullptr : model->getJointModelGroup(arm_a.group_name);
+    const auto * arm_b_group = model->getJointModelGroup(arm_b.group_name);
     const auto * joint_group = model->getJointModelGroup(pair.group_name);
-    if ((!single_arm && (!leader_group || !leader_group->isChain())) ||
-      !follower_group || !joint_group || !follower_group->isChain())
+    if ((!single_arm && (!arm_a_group || !arm_a_group->isChain())) ||
+      !arm_b_group || !joint_group || !arm_b_group->isChain())
     {
       error = "Unknown planning group or manipulator group is not a serial chain";
       return false;
     }
-    leader_tip = single_arm ? nullptr : model->getLinkModel(leader.tip_frame);
-    follower_tip = model->getLinkModel(follower.tip_frame);
-    if ((!single_arm && !leader_tip) || !follower_tip) {
+    arm_a_tip = single_arm ? nullptr : model->getLinkModel(arm_a.tip_frame);
+    arm_b_tip = model->getLinkModel(arm_b.tip_frame);
+    if ((!single_arm && !arm_a_tip) || !arm_b_tip) {
       error = "Unknown manipulator tip frame";
       return false;
     }
@@ -197,9 +194,9 @@ public:
         for (const auto * joint : group->getActiveJointModels()) {out.insert(joint->getName());}
         return out;
       };
-    const auto leader_names = single_arm ? std::set<std::string>() : active_names(leader_group);
-    const auto follower_names = active_names(follower_group);
-    if ((!single_arm && leader_names.empty()) || follower_names.empty()) {
+    const auto arm_a_names = single_arm ? std::set<std::string>() : active_names(arm_a_group);
+    const auto arm_b_names = active_names(arm_b_group);
+    if ((!single_arm && arm_a_names.empty()) || arm_b_names.empty()) {
       error = single_arm ? "Selected manipulator group must contain active joints" :
         "Both selected manipulator groups must contain active joints";
       return false;
@@ -212,11 +209,11 @@ public:
         }
         return std::includes(ancestors.begin(), ancestors.end(), required.begin(), required.end());
       };
-    if ((!single_arm && !tip_contains(leader_tip, leader_names)) || !tip_contains(follower_tip, follower_names)) {
+    if ((!single_arm && !tip_contains(arm_a_tip, arm_a_names)) || !tip_contains(arm_b_tip, arm_b_names)) {
       error = "Configured tip must be downstream of every active joint of its manipulator";
       return false;
     }
-    for (const auto * tip : {leader_tip, follower_tip}) {
+    for (const auto * tip : {arm_a_tip, arm_b_tip}) {
       for (auto link = tip; link; link = link->getParentLinkModel()) {
         const auto * joint = link->getParentJointModel();
         if (joint && joint->getMimic()) {
@@ -225,9 +222,9 @@ public:
         }
       }
     }
-    for (const auto * arm : {&leader, &follower}) {
-      if (single_arm && arm == &leader) {continue;}
-      const auto & expected = arm == &leader ? leader_names : follower_names;
+    for (const auto * arm : {&arm_a, &arm_b}) {
+      if (single_arm && arm == &arm_a) {continue;}
+      const auto & expected = arm == &arm_a ? arm_a_names : arm_b_names;
       if (!arm->joint_names.empty() &&
         (std::set<std::string>(arm->joint_names.begin(), arm->joint_names.end()) != expected ||
         arm->joint_names.size() != expected.size()))
@@ -236,14 +233,14 @@ public:
         return false;
       }
     }
-    for (const auto & name : leader_names) {
-      if (follower_names.count(name)) {
+    for (const auto & name : arm_a_names) {
+      if (arm_b_names.count(name)) {
         error = "Manipulator groups share an active joint: " + name;
         return false;
       }
     }
-    std::set<std::string> combined = leader_names;
-    combined.insert(follower_names.begin(), follower_names.end());
+    std::set<std::string> combined = arm_a_names;
+    combined.insert(arm_b_names.begin(), arm_b_names.end());
     if (combined.empty() || combined != active_names(joint_group)) {
       error = "Combined planning group must contain exactly the selected arms' active joints";
       return false;
@@ -262,10 +259,17 @@ public:
       }
       joints.push_back(joint);
       joint_names.push_back(joint->getVariableNames().front());
-      is_leader.push_back(leader_names.count(joint->getName()) != 0);
       is_prismatic.push_back(joint->getType() == moveit::core::JointModel::PRISMATIC);
     }
     const Eigen::Index size = static_cast<Eigen::Index>(joints.size());
+    if (!options.weights.empty() && options.weights.size() != joints.size()) {
+      error = "planning.weights must match the combined group's active joint count";
+      return false;
+    }
+    joint_weights = Eigen::VectorXd::Zero(size);
+    for (std::size_t i = 0; i < options.weights.size(); ++i) {
+      joint_weights(static_cast<Eigen::Index>(i)) = options.weights[i];
+    }
     q0.resize(size); qnom.resize(size); lower.resize(size); upper.resize(size);
     vmax.resize(size); amax.resize(size);
     for (Eigen::Index i = 0; i < size; ++i) {
@@ -307,10 +311,8 @@ public:
     }
     start.update();
     const auto current = evaluate(q0);
-    leader0 = current.leader;
+    arm_a0 = current.arm_a;
     relative0 = current.relative;
-    leader_fixed = goal.leader_position_radius == 0.0 &&
-      goal.leader_orientation_threshold.isZero(0.0);
     if (!valid(q0, 0.0, error)) {error = "Invalid initial state: " + error; return false;}
     return true;
   }
@@ -326,22 +328,22 @@ public:
   {
     auto state = stateAt(q);
     Evaluation result;
-    result.leader = single_arm ? model_from_reference : state.getGlobalLinkTransform(leader_tip);
-    result.follower = state.getGlobalLinkTransform(follower_tip);
+    result.arm_a = single_arm ? model_from_reference : state.getGlobalLinkTransform(arm_a_tip);
+    result.arm_b = state.getGlobalLinkTransform(arm_b_tip);
     result.relative = BimanualCartesianPlanner::relativePoseInReference(
-      result.leader, result.follower, model_from_reference);
+      result.arm_a, result.arm_b, model_from_reference);
     if (!jacobians) {return result;}
-    result.leader_jacobian = Eigen::MatrixXd::Zero(6, q.size());
-    if (!single_arm) {result.leader_jacobian = jacobian(state, leader_tip, leader.group_name);}
-    const Eigen::MatrixXd follower_jacobian = jacobian(state, follower_tip, follower.group_name);
+    result.arm_a_jacobian = Eigen::MatrixXd::Zero(6, q.size());
+    if (!single_arm) {result.arm_a_jacobian = jacobian(state, arm_a_tip, arm_a.group_name);}
+    const Eigen::MatrixXd arm_b_jacobian = jacobian(state, arm_b_tip, arm_b.group_name);
     result.relative_jacobian = Eigen::MatrixXd::Zero(6, q.size());
     const Eigen::Matrix3d rotation = model_from_reference.rotation().transpose();
-    result.relative_jacobian.topRows(3) = rotation * (follower_jacobian.topRows(3) -
-      result.leader_jacobian.topRows(3));
-    // Spatial angular velocity of R_F R_L^T is omega_F - (R_F R_L^T) omega_L.
-    const Eigen::Matrix3d delta = result.follower.rotation() * result.leader.rotation().transpose();
+    result.relative_jacobian.topRows(3) = rotation * (arm_b_jacobian.topRows(3) -
+      result.arm_a_jacobian.topRows(3));
+    // Spatial angular velocity of R_B R_A^T is omega_B - (R_B R_A^T) omega_A.
+    const Eigen::Matrix3d delta = result.arm_b.rotation() * result.arm_a.rotation().transpose();
     result.relative_jacobian.bottomRows(3) = rotation *
-      (follower_jacobian.bottomRows(3) - delta * result.leader_jacobian.bottomRows(3));
+      (arm_b_jacobian.bottomRows(3) - delta * result.arm_a_jacobian.bottomRows(3));
     return result;
   }
 
@@ -366,28 +368,12 @@ public:
     return error;
   }
 
-  bool leaderValid(const Eigen::VectorXd & q, const Evaluation & current) const
-  {
-    if (leader_fixed) {
-      for (Eigen::Index i = 0; i < q.size(); ++i) {
-        if (is_leader[static_cast<std::size_t>(i)] && q(i) != q0(i)) {return false;}
-      }
-    }
-    const auto rpy = BimanualCartesianPlanner::leaderOrientationDelta(
-      leader0.rotation(), current.leader.rotation());
-    return (current.leader.translation() - leader0.translation()).norm() <=
-      goal.leader_position_radius + options.position_epsilon &&
-      (rpy.cwiseAbs().array() <=
-      (goal.leader_orientation_threshold.array() + options.orientation_epsilon)).all();
-  }
-
   bool valid(const Eigen::VectorXd & q, double progress, std::string & error) const
   {
     if (q.size() != q0.size() || !q.allFinite() ||
       (q.array() < lower.array() - 1.0e-9).any() || (q.array() > upper.array() + 1.0e-9).any())
     {error = "Joint position limits exceeded"; return false;}
     const auto current = evaluate(q);
-    if (!leaderValid(q, current)) {error = "Leader position/orientation constraints exceeded"; return false;}
     const auto residual = errorAt(current, progress);
     if ((residual.head<3>().cwiseAbs().array() >
       goal.relative_position_tolerance.array() + options.position_epsilon).any() ||
@@ -427,7 +413,6 @@ public:
     Eigen::VectorXd & solution, std::string & error) const
   {
     Eigen::VectorXd q = seed.cwiseMax(lower).cwiseMin(upper);
-    if (!restoreLeader(q)) {error = "Seed cannot satisfy leader constraints"; return false;}
     const Eigen::Index n = q.size();
     double trust = 1.0;
     double slack_weight = 1.0e4;
@@ -437,8 +422,7 @@ public:
       const Vector6 residual = errorAt(current, progress);
       if (valid(q, progress, error)) {solution = q; return true;}
       const int variables = static_cast<int>(n) + 6;
-      const int leader_rows = leader_fixed ? 0 : (goal.leader_position_radius == 0.0 ? 6 : 4);
-      const int count = static_cast<int>(n) + 18 + leader_rows;
+      const int count = static_cast<int>(n) + 18;
       Eigen::MatrixXd h = Eigen::MatrixXd::Zero(variables, variables);
       Eigen::VectorXd g = Eigen::VectorXd::Zero(variables);
       Vector6 weights;
@@ -448,11 +432,11 @@ public:
         weights.asDiagonal() * current.relative_jacobian;
       g.head(n) = -2.0 * current.relative_jacobian.transpose() * weights.asDiagonal() * residual;
       for (Eigen::Index i = 0; i < n; ++i) {
-        const double leader_weight = is_leader[static_cast<std::size_t>(i)] ? options.leader_motion_weight : 0.0;
-        const double regularization = options.continuity_weight + leader_weight + options.nominal_weight;
+        const double joint_weight = joint_weights(i);
+        const double regularization = options.continuity_weight + joint_weight + options.nominal_weight;
         h(i, i) += 2.0 * regularization + options.damping * options.damping;
         g(i) += 2.0 * (options.continuity_weight * (q(i) - previous(i)) +
-          leader_weight * (q(i) - q0(i)) + options.nominal_weight * (q(i) - qnom(i)));
+          joint_weight * (q(i) - q0(i)) + options.nominal_weight * (q(i) - qnom(i)));
       }
       // Slack is exclusively an internal SQP restoration aid. Final acceptance
       // always checks the original nonlinear constraints without slack.
@@ -467,7 +451,6 @@ public:
           options.max_prismatic_step : options.max_joint_step);
         l(row) = std::max(lower(i) - q(i), -step);
         u(row) = std::min(upper(i) - q(i), step);
-        if (leader_fixed && is_leader[static_cast<std::size_t>(i)]) {l(row) = u(row) = q0(i) - q(i);}
       }
       Vector6 tolerances;
       tolerances.head<3>() = goal.relative_position_tolerance;
@@ -482,34 +465,6 @@ public:
         a(row, n + axis) = 1.0;
         l(row++) = 0.0;
       }
-      if (!leader_fixed) {
-        const Eigen::Vector3d displacement = current.leader.translation() - leader0.translation();
-        if (goal.leader_position_radius == 0.0) {
-          a.block(row, 0, 3, n) = current.leader_jacobian.topRows(3);
-          l.segment<3>(row) = -displacement;
-          u.segment<3>(row) = -displacement;
-          row += 3;
-        } else {
-          if (displacement.norm() > 1.0e-12) {
-            a.block(row, 0, 1, n) = displacement.normalized().transpose() * current.leader_jacobian.topRows(3);
-          }
-          u(row++) = goal.leader_position_radius - displacement.norm();
-        }
-        const auto angles = BimanualCartesianPlanner::leaderOrientationDelta(
-          leader0.rotation(), current.leader.rotation());
-        for (Eigen::Index i = 0; i < n; ++i) {
-          if (!is_leader[static_cast<std::size_t>(i)]) {continue;}
-          auto perturbation = q;
-          perturbation(i) += 1.0e-6;
-          const auto perturbed = BimanualCartesianPlanner::leaderOrientationDelta(
-            leader0.rotation(), evaluate(perturbation).leader.rotation());
-          for (int axis = 0; axis < 3; ++axis) {
-            a(row + axis, i) = std::remainder(perturbed(axis) - angles(axis), 2.0 * kPi) / 1.0e-6;
-          }
-        }
-        l.segment<3>(row) = -goal.leader_orientation_threshold - angles;
-        u.segment<3>(row) = goal.leader_orientation_threshold - angles;
-      }
       Eigen::VectorXd increment;
       const double remaining = std::chrono::duration<double>(deadline - std::chrono::steady_clock::now()).count();
       if (!solveQp(h, g, a, l, u, remaining, increment)) {
@@ -523,7 +478,6 @@ public:
         if (stopped(error)) {return false;}
         Eigen::VectorXd candidate = q + std::ldexp(1.0, -line) * increment.head(n);
         candidate = candidate.cwiseMax(lower).cwiseMin(upper);
-        if (!restoreLeader(candidate)) {continue;}
         auto state = stateAt(candidate);
         if (scene->isStateColliding(state)) {continue;}
         if (valid(candidate, progress, error) || merit(candidate, previous, progress, slack_weight) < old_merit - 1.0e-12) {
@@ -557,21 +511,11 @@ public:
       error = "Maximum trajectory waypoint count reached"; return false;
     }
     const Waypoint previous = points.back();
-    std::vector<Eigen::Index> leader_seeds, follower_seeds, seed_joints;
-    for (Eigen::Index i = 0; i < previous.q.size(); ++i) {
-      if (is_leader[static_cast<std::size_t>(i)]) {
-        if (!leader_fixed) {leader_seeds.push_back(i);}
-      } else {follower_seeds.push_back(i);}
-    }
-    for (std::size_t i = 0; i < std::max(leader_seeds.size(), follower_seeds.size()); ++i) {
-      if (i < follower_seeds.size()) {seed_joints.push_back(follower_seeds[i]);}
-      if (i < leader_seeds.size()) {seed_joints.push_back(leader_seeds[i]);}
-    }
     for (int seed = 0; seed <= options.recovery_seeds; ++seed) {
       if (stopped(error)) {return false;}
       Eigen::VectorXd initial = previous.q;
       if (seed > 0) {
-        const Eigen::Index joint = seed_joints[static_cast<std::size_t>((seed - 1) / 2) % seed_joints.size()];
+        const Eigen::Index joint = ((seed - 1) / 2) % previous.q.size();
         const double sign = seed % 2 ? 1.0 : -1.0;
         const double max_offset = is_prismatic[static_cast<std::size_t>(joint)] ? 0.005 : 0.05;
         const double range = upper(joint) - lower(joint);
@@ -802,8 +746,8 @@ public:
 
   planning_scene::PlanningSceneConstPtr scene;
   moveit::core::RobotState start;
-  const Arm & leader;
-  const Arm & follower;
+  const Arm & arm_a;
+  const Arm & arm_b;
   const Pair & pair;
   const GoalSpec & goal;
   const Options & options;
@@ -811,18 +755,16 @@ public:
   const BimanualCartesianPlanner::Progress & feedback;
   bool single_arm;
   std::chrono::steady_clock::time_point deadline;
-  const moveit::core::LinkModel * leader_tip = nullptr;
-  const moveit::core::LinkModel * follower_tip = nullptr;
+  const moveit::core::LinkModel * arm_a_tip = nullptr;
+  const moveit::core::LinkModel * arm_b_tip = nullptr;
   std::vector<const moveit::core::JointModel *> joints;
   std::vector<std::string> joint_names;
-  std::vector<bool> is_leader;
   std::vector<bool> is_prismatic;
-  Eigen::VectorXd q0, qnom, lower, upper, vmax, amax;
-  Eigen::Isometry3d leader0 = Eigen::Isometry3d::Identity();
+  Eigen::VectorXd q0, qnom, lower, upper, vmax, amax, joint_weights;
+  Eigen::Isometry3d arm_a0 = Eigen::Isometry3d::Identity();
   Eigen::Isometry3d relative0 = Eigen::Isometry3d::Identity();
   std::string reference_frame;
   Eigen::Isometry3d model_from_reference = Eigen::Isometry3d::Identity();
-  bool leader_fixed = false;
 
 private:
   double projectedProgress(const Eigen::VectorXd & q, double before, double after) const
@@ -883,51 +825,13 @@ private:
       options.continuity_weight * (q - previous).squaredNorm() +
       options.nominal_weight * (q - qnom).squaredNorm();
     for (Eigen::Index i = 0; i < q.size(); ++i) {
-      if (is_leader[static_cast<std::size_t>(i)]) {result += options.leader_motion_weight * std::pow(q(i) - q0(i), 2);}
+      result += joint_weights(i) * std::pow(q(i) - q0(i), 2);
     }
     const Eigen::Vector3d p_excess = (residual.head<3>().cwiseAbs() - goal.relative_position_tolerance).cwiseMax(0.0);
     const Eigen::Vector3d r_excess = (residual.tail<3>().cwiseAbs() - goal.relative_orientation_tolerance).cwiseMax(0.0);
     return result + penalty * (p_excess.squaredNorm() + r_excess.squaredNorm());
   }
 
-  bool restoreLeader(Eigen::VectorXd & q) const
-  {
-    if (leader_fixed) {
-      for (Eigen::Index i = 0; i < q.size(); ++i) {
-        if (is_leader[static_cast<std::size_t>(i)]) {q(i) = q0(i);}
-      }
-      return true;
-    }
-    for (int iteration = 0; iteration < 20; ++iteration) {
-      std::string error;
-      if (stopped(error)) {return false;}
-      const auto current = evaluate(q, true);
-      if (leaderValid(q, current)) {return true;}
-      Eigen::Isometry3d target = current.leader;
-      const auto displacement = current.leader.translation() - leader0.translation();
-      if (displacement.norm() > goal.leader_position_radius) {
-        target.translation() = leader0.translation();
-        if (displacement.norm() > 1.0e-12) {
-          target.translation() += goal.leader_position_radius * displacement.normalized();
-        }
-      }
-      const auto rpy = BimanualCartesianPlanner::leaderOrientationDelta(leader0.rotation(), current.leader.rotation());
-      const auto clipped = rpy.cwiseMax(-goal.leader_orientation_threshold).cwiseMin(goal.leader_orientation_threshold);
-      target.linear() = leader0.rotation() *
-        (Eigen::AngleAxisd(clipped.z(), Eigen::Vector3d::UnitZ()) *
-        Eigen::AngleAxisd(clipped.y(), Eigen::Vector3d::UnitY()) *
-        Eigen::AngleAxisd(clipped.x(), Eigen::Vector3d::UnitX())).toRotationMatrix();
-      Vector6 residual;
-      residual.head<3>() = target.translation() - current.leader.translation();
-      residual.tail<3>() = BimanualCartesianPlanner::orientationError(target.rotation(), current.leader.rotation());
-      const auto & j = current.leader_jacobian;
-      const Eigen::MatrixXd metric = j * j.transpose() + 1.0e-10 * Eigen::Matrix<double, 6, 6>::Identity();
-      const Eigen::VectorXd correction = j.transpose() * metric.ldlt().solve(residual);
-      if (!correction.allFinite()) {return false;}
-      q = (q + correction).cwiseMax(lower).cwiseMin(upper);
-    }
-    return leaderValid(q, evaluate(q));
-  }
 };
 
 bool validOptions(const GoalSpec & goal, const Options & options, std::string & error)
@@ -938,20 +842,18 @@ bool validOptions(const GoalSpec & goal, const Options & options, std::string & 
     std::abs(goal.relative_target.rotation().determinant() - 1.0) > 1.0e-6 ||
     (goal.relative_target.matrix().row(3) - Eigen::RowVector4d(0.0, 0.0, 0.0, 1.0)).norm() > 1.0e-9)
   {error = "Relative target is not a finite rigid transform"; return false;}
-  for (const auto * values : {&goal.leader_orientation_threshold,
-    &goal.relative_position_tolerance, &goal.relative_orientation_tolerance})
+  for (const auto * values : {&goal.relative_position_tolerance, &goal.relative_orientation_tolerance})
   {
     if (!values->allFinite() || (values->array() < 0.0).any()) {
       error = "Cartesian tolerances must be finite and non-negative"; return false;
     }
   }
-  if (!std::isfinite(goal.leader_position_radius) || goal.leader_position_radius < 0.0 ||
-    !finite_positive(goal.planning_time) || goal.planning_time > 3600.0 ||
+  if (!finite_positive(goal.planning_time) || goal.planning_time > 3600.0 ||
     !finite_positive(goal.cartesian_step) ||
     options.max_iterations <= 0 || options.max_waypoints < 2 ||
     options.max_subdivision_depth < 0 || options.recovery_seeds < 0 ||
     options.smoothing_passes < 0 || options.max_timing_refinements < 0)
-  {error = "Invalid planning radius, time, resolution or iteration budget"; return false;}
+  {error = "Invalid planning time, resolution or iteration budget"; return false;}
   for (double value : {options.angular_step, options.position_weight, options.orientation_weight,
     options.damping, options.max_joint_step, options.max_prismatic_step,
     options.validation_joint_step, options.validation_prismatic_step, options.validation_time_step,
@@ -959,10 +861,15 @@ bool validOptions(const GoalSpec & goal, const Options & options, std::string & 
   {
     if (!finite_positive(value)) {error = "Planner resolution, weights, scaling and numerical epsilon must be positive"; return false;}
   }
-  for (double value : {options.continuity_weight, options.leader_motion_weight,
-    options.nominal_weight, options.smoothness_weight})
+  for (double value : {options.continuity_weight, options.nominal_weight, options.smoothness_weight})
   {
     if (!std::isfinite(value) || value < 0.0) {error = "Optimization weights must be finite and non-negative"; return false;}
+  }
+  for (const double weight : options.weights) {
+    if (!std::isfinite(weight) || weight < 0.0) {
+      error = "planning.weights must be finite and non-negative";
+      return false;
+    }
   }
   if (options.velocity_scaling > 1.0 || options.acceleration_scaling > 1.0) {
     error = "Velocity and acceleration scaling must be in (0,1]"; return false;
@@ -982,17 +889,6 @@ Eigen::Vector3d BimanualCartesianPlanner::orientationError(
   return axis_angle.axis() * axis_angle.angle();
 }
 
-Eigen::Vector3d BimanualCartesianPlanner::leaderOrientationDelta(
-  const Eigen::Matrix3d & initial, const Eigen::Matrix3d & current)
-{
-  const Eigen::Matrix3d delta = initial.transpose() * current;
-  const double pitch = std::atan2(-delta(2, 0), std::hypot(delta(0, 0), delta(1, 0)));
-  if (std::abs(std::cos(pitch)) < 1.0e-9) {
-    return {0.0, pitch, std::atan2(-delta(0, 1), delta(1, 1))};
-  }
-  return {std::atan2(delta(2, 1), delta(2, 2)), pitch, std::atan2(delta(1, 0), delta(0, 0))};
-}
-
 Eigen::Isometry3d BimanualCartesianPlanner::interpolateRelativePose(
   const Eigen::Isometry3d & initial, const Eigen::Isometry3d & target, double progress)
 {
@@ -1004,16 +900,16 @@ Eigen::Isometry3d BimanualCartesianPlanner::interpolateRelativePose(
 }
 
 Eigen::Isometry3d BimanualCartesianPlanner::relativePoseInReference(
-  const Eigen::Isometry3d & model_from_leader,
-  const Eigen::Isometry3d & model_from_follower,
+  const Eigen::Isometry3d & model_from_arm_a,
+  const Eigen::Isometry3d & model_from_arm_b,
   const Eigen::Isometry3d & model_from_reference)
 {
   const Eigen::Matrix3d reference_from_model = model_from_reference.rotation().transpose();
   Eigen::Isometry3d result = Eigen::Isometry3d::Identity();
   result.translation() = reference_from_model *
-    (model_from_follower.translation() - model_from_leader.translation());
-  result.linear() = reference_from_model * model_from_follower.rotation() *
-    model_from_leader.rotation().transpose() * model_from_reference.rotation();
+    (model_from_arm_b.translation() - model_from_arm_a.translation());
+  result.linear() = reference_from_model * model_from_arm_b.rotation() *
+    model_from_arm_a.rotation().transpose() * model_from_reference.rotation();
   return result;
 }
 
@@ -1041,7 +937,7 @@ namespace
 {
 bool planCartesian(
   const planning_scene::PlanningSceneConstPtr & scene, const moveit::core::RobotState & start,
-  const Arm & leader, const Arm & follower, const Pair & pair, const GoalSpec & goal,
+  const Arm & arm_a, const Arm & arm_b, const Pair & pair, const GoalSpec & goal,
   const Options & options, PlannedTrajectory & output, std::string & message,
   const BimanualCartesianPlanner::CancelCheck & canceled,
   const BimanualCartesianPlanner::Progress & progress, bool single_arm)
@@ -1049,7 +945,7 @@ bool planCartesian(
   output = PlannedTrajectory();
   if (!validOptions(goal, options, message)) {return false;}
   try {
-    PlanningContext context(scene, start, leader, follower, pair, goal, options, canceled, progress, single_arm);
+    PlanningContext context(scene, start, arm_a, arm_b, pair, goal, options, canceled, progress, single_arm);
     if (context.stopped(message) || !context.initialize(message)) {return false;}
     const double distance = (goal.relative_target.translation() - context.relative0.translation()).norm();
     const double angle = BimanualCartesianPlanner::orientationError(goal.relative_target.rotation(), context.relative0.rotation()).norm();
@@ -1072,7 +968,7 @@ bool planCartesian(
     if (!context.timeAndValidate(waypoints, completed, message)) {return false;}
     if (!context.validateTimed(completed, message)) {return false;}
     if (context.stopped(message)) {return false;}
-    completed.initial_leader_pose = context.leader0;
+    completed.initial_arm_a_pose = context.arm_a0;
     completed.reference_frame = context.reference_frame;
     completed.model_from_reference = context.model_from_reference;
     completed.initial_relative_pose = context.relative0;
@@ -1088,8 +984,8 @@ bool planCartesian(
 }
 
 bool validateCartesian(
-  const planning_scene::PlanningSceneConstPtr & scene, const Arm & leader,
-  const Arm & follower, const Pair & pair, const GoalSpec & goal, const Options & options,
+  const planning_scene::PlanningSceneConstPtr & scene, const Arm & arm_a,
+  const Arm & arm_b, const Pair & pair, const GoalSpec & goal, const Options & options,
   const PlannedTrajectory & plan, std::string & message,
   const BimanualCartesianPlanner::CancelCheck & canceled, bool single_arm)
 {
@@ -1112,12 +1008,12 @@ bool validateCartesian(
     }
     baseline.update();
     const BimanualCartesianPlanner::Progress progress;
-    PlanningContext context(scene, baseline, leader, follower,
+    PlanningContext context(scene, baseline, arm_a, arm_b,
       pair, goal, options, canceled, progress, single_arm);
     if (context.stopped(message) || !context.initialize(message)) {return false;}
     if (context.reference_frame != plan.reference_frame ||
       (context.model_from_reference.matrix() - plan.model_from_reference.matrix()).norm() > 1.0e-8 ||
-      (context.leader0.matrix() - plan.initial_leader_pose.matrix()).norm() > 1.0e-8 ||
+      (context.arm_a0.matrix() - plan.initial_arm_a_pose.matrix()).norm() > 1.0e-8 ||
       (context.relative0.matrix() - plan.initial_relative_pose.matrix()).norm() > 1.0e-8 ||
       (goal.relative_target.matrix() - plan.relative_target.matrix()).norm() > 1.0e-8)
     {message = "Stored plan pose references no longer match its initial state or goal"; return false;}
@@ -1134,19 +1030,19 @@ bool validateCartesian(
 
 bool BimanualCartesianPlanner::plan(
   const planning_scene::PlanningSceneConstPtr & scene, const moveit::core::RobotState & start,
-  const Arm & leader, const Arm & follower, const Pair & pair, const GoalSpec & goal,
+  const Arm & arm_a, const Arm & arm_b, const Pair & pair, const GoalSpec & goal,
   const Options & options, PlannedTrajectory & output, std::string & message,
   const CancelCheck & canceled, const Progress & progress) const
 {
-  return planCartesian(scene, start, leader, follower, pair, goal, options, output, message, canceled, progress, false);
+  return planCartesian(scene, start, arm_a, arm_b, pair, goal, options, output, message, canceled, progress, false);
 }
 
 bool BimanualCartesianPlanner::validatePlan(
-  const planning_scene::PlanningSceneConstPtr & scene, const Arm & leader, const Arm & follower,
+  const planning_scene::PlanningSceneConstPtr & scene, const Arm & arm_a, const Arm & arm_b,
   const Pair & pair, const GoalSpec & goal, const Options & options, const PlannedTrajectory & plan,
   std::string & message, const CancelCheck & canceled) const
 {
-  return validateCartesian(scene, leader, follower, pair, goal, options, plan, message, canceled, false);
+  return validateCartesian(scene, arm_a, arm_b, pair, goal, options, plan, message, canceled, false);
 }
 
 bool SingleArmCartesianPlanner::plan(

@@ -106,7 +106,13 @@ bool PlanBimanualCartesianTrajectoryActionServer::loadConfiguration(std::string 
   p.position_weight = parameter<double>(*this, "planning.position_weight", 10.0);
   p.orientation_weight = parameter<double>(*this, "planning.orientation_weight", 2.0);
   p.continuity_weight = parameter<double>(*this, "planning.continuity_weight", 5.0);
-  p.leader_motion_weight = parameter<double>(*this, "planning.leader_motion_weight", 10.0);
+  p.weights = parameter<std::vector<double>>(*this, "planning.weights", {});
+  for (const double weight : p.weights) {
+    if (!std::isfinite(weight) || weight < 0.0) {
+      error = "planning.weights must be finite and non-negative";
+      return false;
+    }
+  }
   p.nominal_weight = parameter<double>(*this, "planning.nominal_weight", 0.1);
   p.smoothness_weight = parameter<double>(*this, "planning.smoothness_weight", 0.5);
   p.damping = parameter<double>(*this, "planning.damping", 0.001);
@@ -254,6 +260,15 @@ PlanBimanualCartesianTrajectoryActionServer::on_configure(const rclcpp_lifecycle
       if (expected != std::set<std::string>(names.begin(), names.end())) {
         throw std::runtime_error("Combined group must contain exactly the pair's active joints");
       }
+      const auto & weights = planner_options_.weights;
+      if (!weights.empty() && weights.size() != names.size()) {
+        throw std::runtime_error("planning.weights must contain " + std::to_string(names.size()) +
+          " entries for combined group '" + pair.group_name + "'");
+      }
+      for (std::size_t i = 0; i < names.size(); ++i) {
+        RCLCPP_INFO(get_logger(), "planning.weights[%zu] (%s): %s = %.6g", i,
+          pair.group_name.c_str(), names[i].c_str(), weights.empty() ? 0.0 : weights[i]);
+      }
     }
     if (fixed_frame_.empty()) {fixed_frame_ = model->getModelFrame();}
     visualization_ = std::make_unique<CartesianTrajectoryVisualization>(
@@ -308,19 +323,19 @@ PlanBimanualCartesianTrajectoryActionServer::on_shutdown(const rclcpp_lifecycle:
 bool PlanBimanualCartesianTrajectoryActionServer::validateGoal(
   const Action::Goal & goal, PendingPlan & pending, std::string & error) const
 {
-  const auto leader = arms_.find(goal.leader_arm), follower = arms_.find(goal.follower_arm);
-  if (leader == arms_.end()) {error = "Unknown leader arm: " + goal.leader_arm; return false;}
-  if (follower == arms_.end()) {error = "Unknown follower arm: " + goal.follower_arm; return false;}
-  if (leader == follower) {error = "Leader and follower must be different arms"; return false;}
+  const auto arm_a = arms_.find(goal.arm_a), arm_b = arms_.find(goal.arm_b);
+  if (arm_a == arms_.end()) {error = "Unknown arm A: " + goal.arm_a; return false;}
+  if (arm_b == arms_.end()) {error = "Unknown arm B: " + goal.arm_b; return false;}
+  if (arm_a == arm_b) {error = "Arm A and arm B must be different arms"; return false;}
   if (goal.relative_target.header.frame_id != relative_reference_frame_) {
     error = "relative_target.frame_id must equal configured reference frame '" + relative_reference_frame_ + "'"; return false;
   }
-  pending.leader = leader->second; pending.follower = follower->second;
+  pending.arm_a = arm_a->second; pending.arm_b = arm_b->second;
   bool found = false;
   for (const auto & entry : pairs_) {
     const auto & names = entry.second.arm_names;
-    if (std::find(names.begin(), names.end(), goal.leader_arm) != names.end() &&
-      std::find(names.begin(), names.end(), goal.follower_arm) != names.end())
+    if (std::find(names.begin(), names.end(), goal.arm_a) != names.end() &&
+      std::find(names.begin(), names.end(), goal.arm_b) != names.end())
     {pending.pair = entry.second; found = true; break;}
   }
   if (!found) {error = "The selected arm pair is not configured"; return false;}
@@ -340,13 +355,10 @@ bool PlanBimanualCartesianTrajectoryActionServer::validateGoal(
   const auto & pose = goal.relative_target.pose;
   Eigen::Quaterniond quaternion(pose.orientation.w, pose.orientation.x, pose.orientation.y, pose.orientation.z);
   spec.relative_target.translation() = Eigen::Vector3d(pose.position.x, pose.position.y, pose.position.z);
-  spec.leader_position_radius = goal.leader_position_radius;
-  spec.leader_orientation_threshold = vector(goal.leader_orientation_threshold);
   spec.relative_position_tolerance = vector(goal.relative_position_tolerance);
   spec.relative_orientation_tolerance = vector(goal.relative_orientation_tolerance);
   if (!quaternion.coeffs().allFinite() || std::abs(quaternion.norm() - 1.0) > 0.001 ||
-    !spec.relative_target.translation().allFinite() || !std::isfinite(spec.leader_position_radius) || spec.leader_position_radius < 0.0 ||
-    !spec.leader_orientation_threshold.allFinite() || (spec.leader_orientation_threshold.array() < 0.0).any() ||
+    !spec.relative_target.translation().allFinite() ||
     !spec.relative_position_tolerance.allFinite() || (spec.relative_position_tolerance.array() < 0.0).any() ||
     !spec.relative_orientation_tolerance.allFinite() || (spec.relative_orientation_tolerance.array() < 0.0).any() ||
     !std::isfinite(goal.cartesian_step) || !std::isfinite(goal.planning_time))
@@ -404,8 +416,8 @@ void PlanBimanualCartesianTrajectoryActionServer::planGoal(const std::shared_ptr
 {
   try {
     const auto canceled = [this, pending]() {return stopped_.load() || pending->handle->is_canceling() || !pending->handle->is_active();};
-    std::vector<std::string> names = pending->leader.joint_names;
-    names.insert(names.end(), pending->follower.joint_names.begin(), pending->follower.joint_names.end());
+    std::vector<std::string> names = pending->arm_a.joint_names;
+    names.insert(names.end(), pending->arm_b.joint_names.begin(), pending->arm_b.joint_names.end());
     planning_scene::PlanningScenePtr scene;
     std::string error;
     feedback(pending->handle, 0.0F, "acquiring_state", "Reading current joint states and planning scene");
@@ -413,15 +425,14 @@ void PlanBimanualCartesianTrajectoryActionServer::planGoal(const std::shared_ptr
       !visualization_->modelTransform(context_->model()->getModelFrame(), pending->fixed_from_model, error))
     {finish(pending, false, error); return;}
     const bimanual_cartesian::BimanualCartesianPlanner planner;
-    if (!planner.plan(scene, scene->getCurrentState(), pending->leader, pending->follower, pending->pair,
+    if (!planner.plan(scene, scene->getCurrentState(), pending->arm_a, pending->arm_b, pending->pair,
         pending->goal, pending->options, pending->plan, error, canceled,
         [this, pending](double value, const std::string & stage) {
           feedback(pending->handle, static_cast<float>(0.1 + 0.7 * value), stage, "Planning constrained bimanual trajectory");
         }))
     {finish(pending, false, error); return;}
     if (canceled()) {finish(pending, false, "Planning canceled"); return;}
-    pending->views = visualization_->publish(pending->plan, pending->leader, pending->follower,
-      pending->goal.leader_position_radius);
+    pending->views = visualization_->publish(pending->plan, pending->arm_a, pending->arm_b);
     context_->display(*pending->plan.trajectory);
     retain(pending, "Trajectory planned and published; waiting for execute trigger");
     if (pending->handle->get_goal()->execute && !canceled()) {
@@ -446,7 +457,7 @@ bool PlanBimanualCartesianTrajectoryActionServer::backendReady(const PendingPlan
       required[pending.pair.task_manager_service].insert(pending.pair.task_controller_name);
     }
   } else {
-    for (const auto & arm : {pending.leader, pending.follower}) {
+    for (const auto & arm : {pending.arm_a, pending.arm_b}) {
       if (arm.controller_action.empty()) {error = "No controller action for arm '" + arm.name + "'"; return false;}
       if (!arm.manager_service.empty()) {required[arm.manager_service].insert(arm.controller_name);}
     }
@@ -481,7 +492,7 @@ bool PlanBimanualCartesianTrajectoryActionServer::validatePending(const PendingP
   if (!context_->snapshot(pending.plan.joint_trajectory.joint_names, state_timeout_, state_max_age_, scene, error, canceled)) {return false;}
   const auto & measured = scene->getCurrentState();
   const auto & planned_start = pending.plan.trajectory->getFirstWayPoint();
-  for (const auto & arm : {pending.leader, pending.follower}) {
+  for (const auto & arm : {pending.arm_a, pending.arm_b}) {
     const auto * group = context_->model()->getJointModelGroup(arm.group_name);
     const auto * mount = group->getJointModels().front()->getParentLinkModel();
     if (!mount) {continue;}
@@ -511,7 +522,7 @@ bool PlanBimanualCartesianTrajectoryActionServer::validatePending(const PendingP
     Eigen::AngleAxisd(pending.fixed_from_model.rotation().transpose() * current_transform.rotation()).angle() > base_orientation_tolerance_)
   {error = "Plan obsolete: robot base moved; send a new goal"; return false;}
   return bimanual_cartesian::BimanualCartesianPlanner().validatePlan(
-    scene, pending.leader, pending.follower, pending.pair, pending.goal,
+    scene, pending.arm_a, pending.arm_b, pending.pair, pending.goal,
     pending.options, pending.plan, error, canceled);
 }
 
@@ -532,7 +543,7 @@ void PlanBimanualCartesianTrajectoryActionServer::executePlan(const std::shared_
       options.use_common_start_stamp = false;
       options.start_delay = 0.0;
     } else {
-      for (const auto & arm : {pending->leader, pending->follower}) {
+      for (const auto & arm : {pending->arm_a, pending->arm_b}) {
         targets.push_back({arm.name, arm.controller_action, arm.joint_names});
       }
     }
@@ -612,8 +623,8 @@ void PlanBimanualCartesianTrajectoryActionServer::finish(
   result->success = success;
   result->message = message;
   result->joint_trajectory = pending->plan.joint_trajectory;
-  result->leader_path = pending->views.leader_path;
-  result->follower_path = pending->views.follower_path;
+  result->arm_a_path = pending->views.arm_a_path;
+  result->arm_b_path = pending->views.arm_b_path;
   result->relative_path = pending->views.relative_path;
   result->desired_relative_path = pending->views.desired_relative_path;
   {std::lock_guard<std::mutex> lock(mutex_);

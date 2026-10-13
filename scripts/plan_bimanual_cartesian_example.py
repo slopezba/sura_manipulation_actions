@@ -12,12 +12,12 @@ from sura_manipulation_actions.action import PlanBimanualCartesianTrajectory
 from tf2_ros import Buffer, TransformException, TransformListener
 
 
-def relative_pose_components(leader, follower):
+def relative_pose_components(arm_a, arm_b):
     """Displacement and spatial rotation difference in shared reference axes."""
-    position = [getattr(follower.translation, axis) - getattr(leader.translation, axis)
+    position = [getattr(arm_b.translation, axis) - getattr(arm_a.translation, axis)
                 for axis in ("x", "y", "z")]
     quaternions = []
-    for transform in (leader, follower):
+    for transform in (arm_a, arm_b):
         values = [getattr(transform.rotation, axis) for axis in ("x", "y", "z", "w")]
         norm = math.hypot(*values)
         if not math.isfinite(norm) or norm < 1e-12:
@@ -39,10 +39,10 @@ def relative_pose_components(leader, follower):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot-namespace", default="cirtesub")
-    parser.add_argument("--leader", default="alpha_left")
-    parser.add_argument("--follower", default="alpha_right")
-    parser.add_argument("--leader-tip", default="")
-    parser.add_argument("--follower-tip", default="")
+    parser.add_argument("--arm-a", default="alpha_left")
+    parser.add_argument("--arm-b", default="alpha_right")
+    parser.add_argument("--arm-a-tip", default="")
+    parser.add_argument("--arm-b-tip", default="")
     parser.add_argument("--reference-frame", default="",
                         help="Must match relative_reference_frame in the planner; default is robot base_link")
     parser.add_argument("--action", default="")
@@ -65,40 +65,36 @@ def main():
     namespace = args.robot_namespace.strip("/")
     frame_prefix = f"{namespace}/" if namespace else ""
     topic_prefix = f"/{namespace}" if namespace else ""
-    leader_tip = args.leader_tip or f"{frame_prefix}{args.leader}/standard_jaws_tool"
-    follower_tip = args.follower_tip or f"{frame_prefix}{args.follower}/standard_jaws_tool"
+    arm_a_tip = args.arm_a_tip or f"{frame_prefix}{args.arm_a}/standard_jaws_tool"
+    arm_b_tip = args.arm_b_tip or f"{frame_prefix}{args.arm_b}/standard_jaws_tool"
     reference = args.reference_frame or f"{frame_prefix}base_link"
     action_name = args.action or f"{topic_prefix}/manipulation/plan_bimanual_cartesian_trajectory"
     client = ActionClient(node, PlanBimanualCartesianTrajectory, action_name)
     try:
         if not client.wait_for_server(timeout_sec=10.0):
             raise RuntimeError(f"Action unavailable: {action_name}; configure the lifecycle node")
-        future = buffer.wait_for_transform_async(reference, leader_tip, Time())
+        future = buffer.wait_for_transform_async(reference, arm_a_tip, Time())
         rclpy.spin_until_future_complete(node, future, timeout_sec=10.0)
         if not future.done():
-            raise RuntimeError("Timed out waiting for the reference-to-leader TF")
-        leader_tf = buffer.lookup_transform(reference, leader_tip, Time())
-        stamp = Time.from_msg(leader_tf.header.stamp)
-        future = buffer.wait_for_transform_async(reference, follower_tip, stamp)
+            raise RuntimeError("Timed out waiting for the reference-to-arm-A TF")
+        arm_a_tf = buffer.lookup_transform(reference, arm_a_tip, Time())
+        stamp = Time.from_msg(arm_a_tf.header.stamp)
+        future = buffer.wait_for_transform_async(reference, arm_b_tip, stamp)
         rclpy.spin_until_future_complete(node, future, timeout_sec=10.0)
         if not future.done():
-            raise RuntimeError("Timed out waiting for the reference-to-follower TF at the same timestamp")
-        follower_tf = buffer.lookup_transform(reference, follower_tip, stamp)
-        position, quaternion = relative_pose_components(leader_tf.transform, follower_tf.transform)
+            raise RuntimeError("Timed out waiting for the reference-to-arm-B TF at the same timestamp")
+        arm_b_tf = buffer.lookup_transform(reference, arm_b_tip, stamp)
+        position, quaternion = relative_pose_components(arm_a_tf.transform, arm_b_tf.transform)
         goal = PlanBimanualCartesianTrajectory.Goal()
-        goal.leader_arm = args.leader
-        goal.follower_arm = args.follower
+        goal.arm_a = args.arm_a
+        goal.arm_b = args.arm_b
         goal.relative_target.header.frame_id = reference
-        goal.relative_target.header.stamp = leader_tf.header.stamp
+        goal.relative_target.header.stamp = arm_a_tf.header.stamp
         goal.relative_target.pose.position.x = position[0] + args.relative_dx
         goal.relative_target.pose.position.y = position[1]
         goal.relative_target.pose.position.z = position[2]
         for axis, value in zip(("x", "y", "z", "w"), quaternion):
             setattr(goal.relative_target.pose.orientation, axis, value)
-        goal.leader_position_radius = 0.03
-        goal.leader_orientation_threshold.x = 0.1
-        goal.leader_orientation_threshold.y = 0.1
-        goal.leader_orientation_threshold.z = 0.1
         goal.relative_position_tolerance.x = 0.002
         goal.relative_position_tolerance.y = 0.002
         goal.relative_position_tolerance.z = 0.002

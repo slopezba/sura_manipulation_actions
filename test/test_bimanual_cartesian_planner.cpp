@@ -3,6 +3,7 @@
 #include "sura_manipulation_actions/single_arm_cartesian_planner.hpp"
 
 #include <gtest/gtest.h>
+#include <moveit/robot_model/joint_model_group.h>
 #include <moveit_msgs/msg/collision_object.hpp>
 #include <shape_msgs/msg/solid_primitive.hpp>
 #include <srdfdom/model.h>
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -107,12 +109,12 @@ struct SyntheticRobot
   GoalSpec goal(double x = 0.02, bool swap = false) const
   {
     const auto & state = scene->getCurrentState();
-    const auto & leader = swap ? right : left;
-    const auto & follower = swap ? left : right;
+    const auto & arm_a = swap ? right : left;
+    const auto & arm_b = swap ? left : right;
     GoalSpec goal;
     goal.reference_frame = model->getModelFrame();
     goal.relative_target = BimanualCartesianPlanner::relativePoseInReference(
-      state.getGlobalLinkTransform(leader.tip_frame), state.getGlobalLinkTransform(follower.tip_frame),
+      state.getGlobalLinkTransform(arm_a.tip_frame), state.getGlobalLinkTransform(arm_b.tip_frame),
       Eigen::Isometry3d::Identity());
     goal.relative_target.translation().x() += x;
     goal.relative_position_tolerance = Eigen::Vector3d::Constant(0.002);
@@ -223,18 +225,7 @@ TEST(BimanualCartesianInterpolation, RejectsMalformedTimesAndDerivativeArrays)
   EXPECT_FALSE(BimanualCartesianPlanner::sampleTrajectory(msg, 0.5, sample, error));
 }
 
-TEST(BimanualCartesianGeometry, LeaderAnglesAreRelativeToInitialOrientation)
-{
-  const Eigen::Matrix3d initial = Eigen::AngleAxisd(2.9, Eigen::Vector3d::UnitZ()).toRotationMatrix();
-  const Eigen::Matrix3d delta =
-    (Eigen::AngleAxisd(0.03, Eigen::Vector3d::UnitZ()) *
-    Eigen::AngleAxisd(-0.02, Eigen::Vector3d::UnitY()) *
-    Eigen::AngleAxisd(0.01, Eigen::Vector3d::UnitX())).toRotationMatrix();
-  const auto rpy = BimanualCartesianPlanner::leaderOrientationDelta(initial, initial * delta);
-  EXPECT_NEAR(rpy.x(), 0.01, 1.0e-12);
-  EXPECT_NEAR(rpy.y(), -0.02, 1.0e-12);
-  EXPECT_NEAR(rpy.z(), 0.03, 1.0e-12);
-}
+
 
 TEST(BimanualCartesianPlanner, GenericDifferentDofArmsProduceOneTimedTrajectory)
 {
@@ -266,24 +257,120 @@ TEST(BimanualCartesianPlanner, GenericDifferentDofArmsProduceOneTimedTrajectory)
     goal, options, plan, error)) << error;
 }
 
-TEST(BimanualCartesianPlanner, FixedLeaderRemainsExactlyAtItsInitialJointPositions)
+TEST(BimanualCartesianPlanner, EqualWeightsDistributeMotionAcrossBothArms)
 {
-  SyntheticRobot robot;
+  SyntheticRobot robot(4, 4);
   BimanualCartesianPlanner planner;
   PlannedTrajectory plan;
   std::string error;
+  auto goal = robot.goal();
+  goal.relative_position_tolerance.setZero();
+  auto options = robot.options();
+  options.weights.assign(8, 1.0);
   ASSERT_TRUE(planner.plan(robot.scene, robot.scene->getCurrentState(), robot.left,
-    robot.right, robot.pair, robot.goal(), robot.options(), plan, error)) << error;
-  for (const auto & name : robot.left.joint_names) {
-    const auto found = std::find(plan.joint_trajectory.joint_names.begin(),
-      plan.joint_trajectory.joint_names.end(), name);
-    ASSERT_NE(found, plan.joint_trajectory.joint_names.end());
-    const auto index = std::distance(plan.joint_trajectory.joint_names.begin(), found);
-    for (const auto & point : plan.joint_trajectory.points) {
-      EXPECT_DOUBLE_EQ(point.positions[static_cast<std::size_t>(index)], 0.0);
-      EXPECT_DOUBLE_EQ(point.velocities[static_cast<std::size_t>(index)], 0.0);
-      EXPECT_DOUBLE_EQ(point.accelerations[static_cast<std::size_t>(index)], 0.0);
-    }
+    robot.right, robot.pair, goal, options, plan, error)) << error;
+  const auto & final = plan.trajectory->getLastWayPoint();
+  const double left = final.getVariablePosition(robot.left.joint_names.front());
+  const double right = final.getVariablePosition(robot.right.joint_names.front());
+  EXPECT_LT(left, -0.005);
+  EXPECT_GT(right, 0.005);
+  EXPECT_NEAR(left, -right, options.position_epsilon);
+  EXPECT_NEAR(right - left, 0.02, options.position_epsilon);
+  EXPECT_EQ(plan.joint_trajectory.points.front().positions, (std::vector<double>(8, 0.0)));
+  ASSERT_TRUE(planner.validatePlan(robot.scene, robot.left, robot.right, robot.pair,
+    goal, options, plan, error)) << error;
+}
+
+TEST(BimanualCartesianPlanner, LargerWeightReducesMotionFromMeasuredInitialPosition)
+{
+  SyntheticRobot robot(4, 4);
+  auto & start = robot.scene->getCurrentStateNonConst();
+  const auto & left_joint = robot.left.joint_names.front();
+  const auto & right_joint = robot.right.joint_names.front();
+  start.setVariablePosition(left_joint, 0.05);
+  start.setVariablePosition(right_joint, -0.03);
+  start.update();
+  auto goal = robot.goal();
+  goal.relative_position_tolerance.setZero();
+  auto options = robot.options();
+  options.weights.assign(8, 0.0);
+  const auto & names = robot.model->getJointModelGroup(robot.pair.group_name)->getVariableNames();
+  const auto index = std::distance(names.begin(), std::find(names.begin(), names.end(), left_joint));
+  ASSERT_LT(static_cast<std::size_t>(index), options.weights.size());
+  BimanualCartesianPlanner planner;
+  PlannedTrajectory unweighted, weighted, swapped;
+  std::string error;
+  ASSERT_TRUE(planner.plan(robot.scene, start, robot.left, robot.right, robot.pair,
+    goal, options, unweighted, error)) << error;
+  options.weights[static_cast<std::size_t>(index)] = 100.0;
+  ASSERT_TRUE(planner.plan(robot.scene, start, robot.left, robot.right, robot.pair,
+    goal, options, weighted, error)) << error;
+  const auto & baseline = unweighted.trajectory->getLastWayPoint();
+  const auto & final = weighted.trajectory->getLastWayPoint();
+  EXPECT_LT(std::abs(final.getVariablePosition(left_joint) - 0.05),
+    0.5 * std::abs(baseline.getVariablePosition(left_joint) - 0.05));
+  EXPECT_GT(final.getVariablePosition(right_joint) + 0.03,
+    baseline.getVariablePosition(right_joint) + 0.03);
+  // Reverse the relative target while keeping weights on the same physical joints.
+  auto reverse_goal = robot.goal(-0.02, true);
+  reverse_goal.relative_position_tolerance.setZero();
+  ASSERT_TRUE(planner.plan(robot.scene, start, robot.right, robot.left, robot.pair,
+    reverse_goal, options, swapped, error)) << error;
+  const auto & reverse_final = swapped.trajectory->getLastWayPoint();
+  for (const auto & name : names) {
+    EXPECT_NEAR(final.getVariablePosition(name), reverse_final.getVariablePosition(name),
+      options.position_epsilon);
+  }
+  ASSERT_TRUE(planner.validatePlan(robot.scene, robot.right, robot.left, robot.pair,
+    reverse_goal, options, swapped, error)) << error;
+}
+
+TEST(BimanualCartesianPlanner, OmittedAndZeroWeightsLeaveBothArmsFree)
+{
+  SyntheticRobot robot(4, 4);
+  BimanualCartesianPlanner planner;
+  PlannedTrajectory omitted, zero;
+  std::string error;
+  auto options = robot.options();
+  const auto goal = robot.goal();
+  ASSERT_TRUE(planner.plan(robot.scene, robot.scene->getCurrentState(), robot.left,
+    robot.right, robot.pair, goal, options, omitted, error)) << error;
+  options.weights.assign(8, 0.0);
+  ASSERT_TRUE(planner.plan(robot.scene, robot.scene->getCurrentState(), robot.left,
+    robot.right, robot.pair, goal, options, zero, error)) << error;
+  const auto & final = zero.trajectory->getLastWayPoint();
+  EXPECT_LT(final.getVariablePosition(robot.left.joint_names.front()), -0.005);
+  EXPECT_GT(final.getVariablePosition(robot.right.joint_names.front()), 0.005);
+  for (const auto & name : zero.joint_trajectory.joint_names) {
+    EXPECT_NEAR(final.getVariablePosition(name),
+      omitted.trajectory->getLastWayPoint().getVariablePosition(name), 1e-9);
+  }
+}
+
+TEST(BimanualCartesianPlanner, RejectsInvalidWeightsInPlanningAndRevalidation)
+{
+  SyntheticRobot robot(4, 4);
+  BimanualCartesianPlanner planner;
+  PlannedTrajectory valid, invalid;
+  std::string error;
+  auto options = robot.options();
+  const auto goal = robot.goal();
+  ASSERT_TRUE(planner.plan(robot.scene, robot.scene->getCurrentState(), robot.left,
+    robot.right, robot.pair, goal, options, valid, error)) << error;
+  const std::vector<std::vector<double>> invalid_weights{
+    std::vector<double>(7, 0.0), std::vector<double>(9, 0.0),
+    std::vector<double>(8, -0.1),
+    std::vector<double>(8, std::numeric_limits<double>::quiet_NaN()),
+    std::vector<double>(8, std::numeric_limits<double>::infinity())};
+  for (const auto & weights : invalid_weights) {
+    options.weights = weights;
+    EXPECT_FALSE(planner.plan(robot.scene, robot.scene->getCurrentState(), robot.left,
+      robot.right, robot.pair, goal, options, invalid, error));
+    EXPECT_FALSE(invalid.trajectory);
+    EXPECT_NE(error.find("planning.weights"), std::string::npos);
+    EXPECT_FALSE(planner.validatePlan(robot.scene, robot.left, robot.right, robot.pair,
+      goal, options, valid, error));
+    EXPECT_NE(error.find("planning.weights"), std::string::npos);
   }
 }
 
@@ -311,8 +398,8 @@ TEST(BimanualCartesianPlanner, ZeroToleranceStraightPathAcceptsRestToRestQuintic
     robot.right.joint_names.front())));
   ASSERT_LT(index, sample.positions.size());
   // At u=.25, quintic geometric progress is .103515625, far from linear time.
-  EXPECT_NEAR(sample.positions[index], 0.02 * 0.103515625, options.position_epsilon);
-  EXPECT_GT(std::abs(sample.positions[index] - 0.02 * 0.25), 0.002);
+  EXPECT_NEAR(sample.positions[index], 0.01 * 0.103515625, options.position_epsilon);
+  EXPECT_GT(std::abs(sample.positions[index] - 0.01 * 0.25), 0.001);
 
   // Projection must retain lateral tolerances: introduce a y excursion with
   // unchanged endpoint positions and reject its between-waypoint curve.
@@ -362,57 +449,57 @@ TEST(BimanualCartesianPlanner, MoveItJacobiansSupportDifferentlyRotatedArmMounts
 
 TEST(BimanualCartesianPlanner, RelativePoseUsesReferenceAxesAndSpatialRotationDifference)
 {
-  Eigen::Isometry3d leader = Eigen::Isometry3d::Identity();
-  Eigen::Isometry3d follower = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d arm_a = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d arm_b = Eigen::Isometry3d::Identity();
   Eigen::Isometry3d reference = Eigen::Isometry3d::Identity();
-  leader.translation() = Eigen::Vector3d(0.2, -0.4, 0.1);
-  follower.translation() = Eigen::Vector3d(0.5, 0.1, -0.2);
-  leader.linear() = Eigen::AngleAxisd(0.8, Eigen::Vector3d::UnitY()).toRotationMatrix();
-  follower.linear() = Eigen::AngleAxisd(-0.5, Eigen::Vector3d::UnitX()).toRotationMatrix();
+  arm_a.translation() = Eigen::Vector3d(0.2, -0.4, 0.1);
+  arm_b.translation() = Eigen::Vector3d(0.5, 0.1, -0.2);
+  arm_a.linear() = Eigen::AngleAxisd(0.8, Eigen::Vector3d::UnitY()).toRotationMatrix();
+  arm_b.linear() = Eigen::AngleAxisd(-0.5, Eigen::Vector3d::UnitX()).toRotationMatrix();
   reference.translation() = Eigen::Vector3d(4.0, 2.0, 1.0);
   reference.linear() = Eigen::AngleAxisd(0.6, Eigen::Vector3d::UnitZ()).toRotationMatrix();
-  const Eigen::Isometry3d leader_in_reference = reference.inverse() * leader;
-  const Eigen::Isometry3d follower_in_reference = reference.inverse() * follower;
-  const auto relative = BimanualCartesianPlanner::relativePoseInReference(leader, follower, reference);
+  const Eigen::Isometry3d arm_a_in_reference = reference.inverse() * arm_a;
+  const Eigen::Isometry3d arm_b_in_reference = reference.inverse() * arm_b;
+  const auto relative = BimanualCartesianPlanner::relativePoseInReference(arm_a, arm_b, reference);
   EXPECT_TRUE(relative.translation().isApprox(
-    follower_in_reference.translation() - leader_in_reference.translation(), 1e-12));
+    arm_b_in_reference.translation() - arm_a_in_reference.translation(), 1e-12));
   EXPECT_TRUE(relative.rotation().isApprox(
-    follower_in_reference.rotation() * leader_in_reference.rotation().transpose(), 1e-12));
-  EXPECT_GT((relative.translation() - (leader.inverse() * follower).translation()).norm(), 0.1);
-  const auto swapped = BimanualCartesianPlanner::relativePoseInReference(follower, leader, reference);
+    arm_b_in_reference.rotation() * arm_a_in_reference.rotation().transpose(), 1e-12));
+  EXPECT_GT((relative.translation() - (arm_a.inverse() * arm_b).translation()).norm(), 0.1);
+  const auto swapped = BimanualCartesianPlanner::relativePoseInReference(arm_b, arm_a, reference);
   EXPECT_TRUE(swapped.translation().isApprox(-relative.translation(), 1e-12));
   EXPECT_TRUE(swapped.rotation().isApprox(relative.rotation().transpose(), 1e-12));
 }
 
-TEST(BimanualCartesianPlanner, RotatedReferenceAxesWorkForBothLeaderRoles)
+TEST(BimanualCartesianPlanner, RotatedReferenceAxesWorkForEitherArmOrder)
 {
   SyntheticRobot robot(4, 6, 0.6, -0.8);
   BimanualCartesianPlanner planner;
   const auto & start = robot.scene->getCurrentState();
   const auto & reference = start.getGlobalLinkTransform("reference");
   for (bool swap : {false, true}) {
-    const auto & leader = swap ? robot.right : robot.left;
-    const auto & follower = swap ? robot.left : robot.right;
+    const auto & arm_a = swap ? robot.right : robot.left;
+    const auto & arm_b = swap ? robot.left : robot.right;
     auto goal = robot.goal(0.0, swap);
     goal.reference_frame = "reference";
     goal.relative_target = BimanualCartesianPlanner::relativePoseInReference(
-      start.getGlobalLinkTransform(leader.tip_frame), start.getGlobalLinkTransform(follower.tip_frame), reference);
+      start.getGlobalLinkTransform(arm_a.tip_frame), start.getGlobalLinkTransform(arm_b.tip_frame), reference);
     goal.relative_target.translation().x() += 0.02;
     goal.relative_position_tolerance = Eigen::Vector3d::Constant(0.0001);
     PlannedTrajectory plan;
     std::string error;
-    ASSERT_TRUE(planner.plan(robot.scene, start, leader, follower, robot.pair,
+    ASSERT_TRUE(planner.plan(robot.scene, start, arm_a, arm_b, robot.pair,
       goal, robot.options(), plan, error)) << error;
     EXPECT_EQ(plan.reference_frame, "reference");
     EXPECT_TRUE(plan.model_from_reference.matrix().isApprox(reference.matrix(), 1e-12));
     const auto & final = plan.trajectory->getLastWayPoint();
     const auto achieved = BimanualCartesianPlanner::relativePoseInReference(
-      final.getGlobalLinkTransform(leader.tip_frame), final.getGlobalLinkTransform(follower.tip_frame), reference);
+      final.getGlobalLinkTransform(arm_a.tip_frame), final.getGlobalLinkTransform(arm_b.tip_frame), reference);
     EXPECT_LE((achieved.translation() - goal.relative_target.translation()).cwiseAbs().maxCoeff(), 0.000101);
-    ASSERT_TRUE(planner.validatePlan(robot.scene, leader, follower, robot.pair,
+    ASSERT_TRUE(planner.validatePlan(robot.scene, arm_a, arm_b, robot.pair,
       goal, robot.options(), plan, error)) << error;
     plan.model_from_reference.translation().x() += 0.01;
-    EXPECT_FALSE(planner.validatePlan(robot.scene, leader, follower, robot.pair,
+    EXPECT_FALSE(planner.validatePlan(robot.scene, arm_a, arm_b, robot.pair,
       goal, robot.options(), plan, error));
   }
 }
@@ -481,7 +568,7 @@ TEST(SingleArmCartesianPlanner, RejectsCollisionBetweenCartesianWaypoints)
   EXPECT_FALSE(plan.trajectory);
 }
 
-TEST(BimanualCartesianPlanner, MovingLeaderWithNoncommutingOrientationsUsesSpatialRelativeJacobian)
+TEST(BimanualCartesianPlanner, MovingArmAWithNoncommutingOrientationsUsesSpatialRelativeJacobian)
 {
   SyntheticRobot robot(6, 6, 0.6, -0.8);
   auto & start = robot.scene->getCurrentStateNonConst();
@@ -493,11 +580,10 @@ TEST(BimanualCartesianPlanner, MovingLeaderWithNoncommutingOrientationsUsesSpati
   start.setVariablePosition(robot.right.joint_names[5], 0.08);
   start.update();
   auto goal = robot.goal(0.0);
-  const Eigen::Matrix3d leader_target = start.getGlobalLinkTransform(robot.left.tip_frame).rotation() *
+  const Eigen::Matrix3d arm_a_target = start.getGlobalLinkTransform(robot.left.tip_frame).rotation() *
     Eigen::AngleAxisd(-0.02, Eigen::Vector3d::UnitX()).toRotationMatrix();
   goal.relative_target.linear() = start.getGlobalLinkTransform(robot.right.tip_frame).rotation() *
-    leader_target.transpose();
-  goal.leader_orientation_threshold.x() = 0.03;
+    arm_a_target.transpose();
   goal.relative_orientation_tolerance = Eigen::Vector3d::Constant(0.0001);
   auto options = robot.options();
   for (const auto & name : robot.right.joint_names) {
@@ -543,7 +629,7 @@ TEST(BimanualCartesianTiming, StationaryTrajectoryGetsHoldAndZeroDerivatives)
   }
 }
 
-TEST(BimanualCartesianPlanner, LeaderAndFollowerCanBeSwapped)
+TEST(BimanualCartesianPlanner, ArmAAndArmBCanBeSwapped)
 {
   SyntheticRobot robot(4, 6);
   BimanualCartesianPlanner planner;
@@ -557,29 +643,22 @@ TEST(BimanualCartesianPlanner, LeaderAndFollowerCanBeSwapped)
     goal, robot.options(), plan, error)) << error;
 }
 
-TEST(BimanualCartesianPlanner, LeaderSphereAllowsJointlyAchievableMotion)
+TEST(BimanualCartesianPlanner, EitherArmCanSupplyMotionWhenTheOtherIsAtItsLimits)
 {
   SyntheticRobot robot;
   BimanualCartesianPlanner planner;
   PlannedTrajectory plan;
   std::string error;
-  auto goal = robot.goal(0.01);
-  goal.leader_position_radius = 0.02;
+  const auto goal = robot.goal(0.01);
   auto options = robot.options();
   options.tightened_limits[robot.right.joint_names[0]] = {0.0, 0.0};
   ASSERT_TRUE(planner.plan(robot.scene, robot.scene->getCurrentState(), robot.left,
     robot.right, robot.pair, goal, options, plan, error)) << error;
-  const auto leader_initial = plan.initial_leader_pose.translation();
-  for (std::size_t i = 0; i < plan.trajectory->getWayPointCount(); ++i) {
-    const auto & state = plan.trajectory->getWayPoint(i);
-    EXPECT_LE((state.getGlobalLinkTransform(robot.left.tip_frame).translation() - leader_initial).norm(),
-      goal.leader_position_radius + options.position_epsilon);
-  }
-  EXPECT_GT((plan.trajectory->getLastWayPoint().getGlobalLinkTransform(robot.left.tip_frame).translation() -
-    leader_initial).norm(), 0.005);
+  EXPECT_LT(plan.trajectory->getLastWayPoint().getVariablePosition(robot.left.joint_names[0]), -0.005);
+  EXPECT_DOUBLE_EQ(plan.trajectory->getLastWayPoint().getVariablePosition(robot.right.joint_names[0]), 0.0);
 }
 
-TEST(BimanualCartesianPlanner, IndependentLeaderOrientationThresholdsPermitOnlyYaw)
+TEST(BimanualCartesianPlanner, ArmACanRotateWhenArmBOrientationIsAtItsLimits)
 {
   SyntheticRobot robot(6, 6);
   BimanualCartesianPlanner planner;
@@ -587,20 +666,16 @@ TEST(BimanualCartesianPlanner, IndependentLeaderOrientationThresholdsPermitOnlyY
   std::string error;
   auto goal = robot.goal(0.0);
   goal.relative_target.linear() = Eigen::AngleAxisd(0.02, Eigen::Vector3d::UnitZ()).toRotationMatrix();
-  goal.leader_orientation_threshold.z() = 0.03;
   auto options = robot.options();
   for (std::size_t i = 3; i < robot.right.joint_names.size(); ++i) {
     options.tightened_limits[robot.right.joint_names[i]] = {0.0, 0.0};
   }
   ASSERT_TRUE(planner.plan(robot.scene, robot.scene->getCurrentState(), robot.left,
     robot.right, robot.pair, goal, options, plan, error)) << error;
-  const auto angles = BimanualCartesianPlanner::leaderOrientationDelta(
-    plan.initial_leader_pose.rotation(),
-    plan.trajectory->getLastWayPoint().getGlobalLinkTransform(robot.left.tip_frame).rotation());
-  EXPECT_NEAR(angles.x(), 0.0, options.orientation_epsilon);
-  EXPECT_NEAR(angles.y(), 0.0, options.orientation_epsilon);
-  EXPECT_LT(angles.z(), -0.01);
-  EXPECT_LE(std::abs(angles.z()), goal.leader_orientation_threshold.z() + options.orientation_epsilon);
+  const auto & final = plan.trajectory->getLastWayPoint();
+  EXPECT_LT(final.getVariablePosition(robot.left.joint_names[3]), -0.01);
+  ASSERT_TRUE(planner.validatePlan(robot.scene, robot.left, robot.right, robot.pair,
+    goal, options, plan, error)) << error;
 }
 
 TEST(BimanualCartesianPlanner, RejectsUnreachableTargetWithoutReturningPartialPlan)
@@ -611,6 +686,7 @@ TEST(BimanualCartesianPlanner, RejectsUnreachableTargetWithoutReturningPartialPl
   std::string error;
   auto options = robot.options();
   options.tightened_limits[robot.right.joint_names[0]] = {-0.001, 0.001};
+  options.tightened_limits[robot.left.joint_names[0]] = {-0.001, 0.001};
   options.recovery_seeds = 0;
   options.max_subdivision_depth = 0;
   auto goal = robot.goal(0.02);
@@ -689,15 +765,16 @@ TEST(BimanualCartesianPlanner, RevalidationDetectsObstacleBetweenOriginalWaypoin
   BimanualCartesianPlanner planner;
   PlannedTrajectory plan;
   std::string error;
-  auto goal = robot.goal(0.02);
-  goal.cartesian_step = 0.02;
+  auto goal = robot.goal(0.04);
+  goal.cartesian_step = 0.04;
   auto options = robot.options();
   // A large tolerance separates the interpolation/collision check from nominal
   // progress: both original endpoints are clear of the new obstacle.
   goal.relative_position_tolerance = Eigen::Vector3d::Constant(0.005);
   ASSERT_TRUE(planner.plan(robot.scene, robot.scene->getCurrentState(), robot.left,
     robot.right, robot.pair, goal, options, plan, error)) << error;
-  robot.obstacle(0.3075);
+  const double end_x = plan.trajectory->getLastWayPoint().getGlobalLinkTransform(robot.right.tip_frame).translation().x();
+  robot.obstacle(0.5 * (0.3 + end_x));
   EXPECT_FALSE(robot.scene->isStateColliding(plan.trajectory->getFirstWayPoint()));
   EXPECT_FALSE(robot.scene->isStateColliding(plan.trajectory->getLastWayPoint()));
   EXPECT_FALSE(planner.validatePlan(robot.scene, robot.left, robot.right, robot.pair,

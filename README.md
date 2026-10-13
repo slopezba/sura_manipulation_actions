@@ -297,9 +297,9 @@ La configuracion `rviz/manipulation_planning.rviz` incluye:
 - `MotionPlanning`: trayectoria en `/cirtesub/moveit/display_planned_path`
 - `MotionPlanning`: planning scene en `/cirtesub/moveit/monitored_planning_scene`
 - Un único display `MarkerArray` en `/cirtesub/manipulation/markers`: cada acción
-  cartesiana publica sus poses, restricciones y líneas juntas en un solo mensaje.
-  Planificado verde, deseado violeta; en bimanual incluye líder cian y seguidor
-  naranja y la esfera permitida. Las acciones articulares usan también este
+  cartesiana publica sus poses y líneas juntas en un solo mensaje.
+  Planificado verde, deseado violeta; en bimanual incluye brazo A cian y brazo B
+  naranja, sin prioridad entre brazos. Las acciones articulares usan también este
   tópico para el debug de colisiones.
 
 Las acciones cartesianas muestran ejes X rojo, Y verde y Z azul en el objetivo

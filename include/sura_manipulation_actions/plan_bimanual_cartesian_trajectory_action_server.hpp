@@ -35,7 +35,7 @@ private:
   struct PendingPlan
   {
     std::shared_ptr<Handle> handle;
-    bimanual_cartesian::Arm leader, follower;
+    bimanual_cartesian::Arm arm_a, arm_b;
     bimanual_cartesian::Pair pair;
     bimanual_cartesian::GoalSpec goal;
     bimanual_cartesian::Options options;

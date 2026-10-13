@@ -34,7 +34,10 @@
     planning.position_weight: 10.0
     planning.orientation_weight: 2.0
     planning.continuity_weight: 5.0
-    planning.leader_motion_weight: 0.0
+    # Additional cost of moving each joint away from its initial position.
+    # Active MoveIt order: alpha_left b,c,d,e; alpha_right b,c,d,e.
+    # Higher weights discourage motion; zero adds no penalty and does not lock.
+    planning.weights: [0.0, 0.0, 0.0, 1.57, 0.0, 0.0, 0.0, 1.57]
     planning.nominal_weight: 0.1
     planning.smoothness_weight: 0.5
     planning.optimize_trajectory: true

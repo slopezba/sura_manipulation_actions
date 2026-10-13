@@ -1,12 +1,10 @@
 # Relative displacement/orientation in the configured reference (base) axes:
-# p = p_follower - p_leader; R = R_follower * R_leader^T, both expressed there.
+# p = p_arm_b - p_arm_a; R = R_arm_b * R_arm_a^T, both expressed there.
 # frame_id must equal relative_reference_frame; this is not an absolute pose.
-string leader_arm
-string follower_arm
+string arm_a
+string arm_b
 geometry_msgs/PoseStamped relative_target
-# Metres and radians; zero constraints remain strict.
-float64 leader_position_radius
-geometry_msgs/Vector3 leader_orientation_threshold
+# Relative tolerances in metres and radians; zero remains strict.
 geometry_msgs/Vector3 relative_position_tolerance
 geometry_msgs/Vector3 relative_orientation_tolerance
 # Non-positive step/time select the configured defaults.
@@ -22,11 +20,11 @@ float64 acceleration_scaling
 bool success
 string message
 trajectory_msgs/JointTrajectory joint_trajectory
-nav_msgs/Path leader_path
-nav_msgs/Path follower_path
+nav_msgs/Path arm_a_path
+nav_msgs/Path arm_b_path
 # Paths use the existing relative_reference_frame and the latest TF (zero stamp).
-# Relative path positions include the initial leader position in that frame as
-# a drawing offset: p_view = p_leader_initial + (p_follower - p_leader).
+# Relative path positions include the initial arm A position in that frame as
+# a drawing offset: p_view = p_arm_a_initial + (p_arm_b - p_arm_a).
 # Their orientations remain the relative rotation difference, not tool poses.
 nav_msgs/Path relative_path
 nav_msgs/Path desired_relative_path

@@ -1,6 +1,6 @@
 # Planificación cartesiana bimanual
 
-`PlanBimanualCartesianTrajectory` calcula una trayectoria articular conjunta para que el seguidor alcance una pose relativa al líder, permitiendo mover al líder dentro de una esfera y de unos umbrales de orientación. La salida ejecutable es `trajectory_msgs/JointTrajectory`; los `nav_msgs/Path` sirven para representar el resultado. No activa tareas ni cambia controladores.
+`PlanBimanualCartesianTrajectory` calcula una trayectoria articular conjunta para alcanzar la separación y orientación relativas entre los brazos A y B. Ambos participan sin prioridad por brazo; `planning.weights` permite penalizar individualmente el movimiento de cada articulación. La salida ejecutable es `trajectory_msgs/JointTrajectory`; los `nav_msgs/Path` sirven para representar el resultado. No activa tareas ni cambia controladores.
 
 ## Lanzamiento y lifecycle
 
@@ -26,17 +26,15 @@ La acción por defecto es `/cirtesub/manipulation/plan_bimanual_cartesian_trajec
 
 | Campo | Significado |
 | --- | --- |
-| `leader_arm`, `follower_arm` | Identificadores exactos de `arm_names`; se pueden intercambiar. |
+| `arm_a`, `arm_b` | Identificadores exactos de `arm_names`; se pueden intercambiar. |
 | `relative_target` | Separación y rotación relativas expresadas en los ejes de `relative_reference_frame` (base); `header.frame_id` debe coincidir con ese frame y el quaternion debe ser unitario. |
-| `leader_position_radius` | Distancia máxima, en metros, respecto a la posición inicial del tip del líder. |
-| `leader_orientation_threshold` | Límites absolutos de roll, pitch y yaw, en radianes, de `R_L0ᵀ · R_L`, convención ZYX. |
 | `relative_position_tolerance` | Tolerancia independiente en X/Y/Z del marco de referencia (base), en metros. |
 | `relative_orientation_tolerance` | Tolerancia independiente del vector logaritmo de SO(3), en radianes, respecto a la orientación relativa deseada. |
 | `cartesian_step`, `planning_time` | Resolución lineal y presupuesto temporal. Valores no positivos usan los defaults del YAML. |
 | `velocity_scaling`, `acceleration_scaling` | Factores de límites articulares en `(0, 1]`; cero usa el valor correspondiente del YAML. Valores negativos, superiores a 1 o no finitos se rechazan. |
 | `execute` | `false`: publicar y esperar el servicio de ejecución; `true`: intentar ejecutar después de planificar. |
 
-Los valores cero de radio, umbrales y tolerancias son restricciones estrictas, con las precisiones numéricas configuradas (`1e-6 m` y `1e-6 rad` por defecto). Si radio y los tres umbrales del líder son cero, sus articulaciones quedan exactamente en la posición inicial. Las componentes parcialmente bloqueadas se imponen como igualdades en la optimización y se vuelven a comprobar sobre la trayectoria final. El primer punto articular conserva exactamente la configuración medida; no se corrige una postura inicial fuera de límites o en colisión.
+Las tolerancias relativas cero son restricciones estrictas, con las precisiones numéricas configuradas (`1e-6 m` y `1e-6 rad` por defecto). El primer punto articular conserva exactamente la configuración medida; no se corrige una postura inicial fuera de límites o en colisión. Ningún brazo queda fijado por el orden A/B.
 
 La velocidad se selecciona antes de planificar mediante `velocity_scaling` y
 `acceleration_scaling`. Por ejemplo, `0.05` limita al 5 % de los máximos cargados
@@ -47,30 +45,61 @@ la ejecución con los mismos límites. Los dos backends reciben los tiempos y
 derivadas resultantes. Para cambiar la velocidad de un plan pendiente, envía
 un goal nuevo. `planning_time` limita el cálculo, no la duración del movimiento.
 
-Sean `p_L`, `R_L` y `p_F`, `R_F` las poses de las pinzas expresadas en la base.
-El objetivo contiene `Δp = p_F - p_L` y `ΔR = R_F · R_Lᵀ`: son la separación
+Sean `p_A`, `R_A` y `p_B`, `R_B` las poses de las pinzas expresadas en la base.
+El objetivo contiene `Δp = p_B - p_A` y `ΔR = R_B · R_Aᵀ`: son la separación
 y la diferencia de orientación en los ejes de la base, no la posición absoluta
-del seguidor ni `T_L⁻¹ · T_F`. Aumentar X en `0.01` pide un centímetro más de
-separación sobre X de la base aunque gire el líder. La orientación identidad
+del brazo B ni `T_A⁻¹ · T_B`. Aumentar X en `0.01` pide un centímetro más de
+separación sobre X de la base aunque gire el brazo A. La orientación identidad
 pide pinzas con igual orientación. El error angular es `log(ΔR_obj · ΔR_actualᵀ)`
 y sus tolerancias por componente se expresan en los ejes de la base.
-Al intercambiar los roles, la separación cambia de signo y la rotación relativa
+Al intercambiar A y B, la separación cambia de signo y la rotación relativa
 se invierte; el frame de referencia permanece igual.
 
 `relative_reference_frame` debe ser un link del modelo que no se mueva con
 ninguna de las articulaciones comandadas. Se fija a su pose medida al comenzar
 el cálculo. Vacío selecciona el frame del modelo. El ejemplo Alpha configura
-`cirtesub/base_link`. Los límites RPY del líder conservan su convención respecto
-a su propia orientación inicial.
+`cirtesub/base_link`.
 
 La referencia relativa interpola linealmente la posición y usa SLERP para la orientación, también cuando solo cambia la orientación. Los pasos por defecto son `0.005 m` y `0.05 rad`. Las tolerancias se aplican durante todo el recorrido relativo. La referencia define un camino geométrico; no exige avance uniforme en tiempo. Al validar cada segmento se proyecta la pose relativa sobre ese tramo de la recta (o del arco SLERP en orientación pura), se acota el progreso a sus endpoints y se comprueban todas las componentes respecto a esa referencia.
+
+## Pesos articulares
+
+El servidor carga `planning.weights` al configurar su lifecycle. Cada valor añade
+el coste `w_i · (q_i - q_inicial_i)²`: cuanto mayor sea, más se penaliza mover esa
+articulación respecto a su posición medida al iniciar el plan. Un cero elimina
+solo esta penalización adicional; no bloquea la articulación. Los costes generales
+de continuidad, postura nominal y suavizado siguen aplicándose.
+
+```yaml
+# Orden: alpha_left axis_b,c,d,e; alpha_right axis_b,c,d,e
+planning.weights: [0.0, 0.0, 0.0, 1.57, 0.0, 0.0, 0.0, 1.57]
+```
+
+Este ejemplo penaliza especialmente `axis_e` de ambos brazos. Los pesos se
+asocian al orden de variables activas del grupo MoveIt conjunto, no al orden A/B
+del goal ni a `planning.limit_joint_names`. En Alpha son las ocho articulaciones
+indicadas arriba. Al configurar se registra cada índice, nombre y peso para
+comprobar la correspondencia con el modelo cargado.
+
+Un vector omitido o vacío equivale a pesos cero. Un vector no vacío debe tener
+un valor por articulación activa, todos finitos y no negativos; una longitud
+incorrecta, NaN, infinito o un valor negativo impiden configurar el servidor.
+El planner también valida esos requisitos cuando se utiliza directamente.
+Los pesos se conservan con el plan pendiente. Para modificarlos, edita el YAML,
+reinicia el servidor para cargarlo y realiza `configure` otra vez. También puedes
+hacer `cleanup`, actualizar el parámetro `planning.weights` y hacer `configure`;
+`cleanup` descarta cualquier plan pendiente. Los goals nuevos usarán los pesos
+cargados; intercambiar A/B conserva el peso de cada articulación física.
+
+La interfaz usa `arm_a`/`arm_b` y devuelve `arm_a_path`/`arm_b_path`; los clientes
+anteriores deben actualizarse y regenerar los mensajes de la acción.
 
 ## Ejemplo Alpha y plan pendiente
 
 Los efectores del ejemplo son `cirtesub/alpha_left/standard_jaws_tool` y
 `cirtesub/alpha_right/standard_jaws_tool`, tanto en el planificador como en el
 cliente de ejemplo. El `frame_id` del objetivo es `cirtesub/base_link` para
-ambos roles.
+ambos órdenes A/B.
 
 El cliente de ejemplo obtiene ambas poses por TF en la base, con el mismo timestamp, y calcula su separación y rotación relativas. Sin desplazamiento comprueba el flujo con la relación actual; puede fallar si el robot ya está fuera de límites o en colisión. Un desplazamiento opcional se expresa sobre X de la base y su viabilidad depende de la postura. `--reference-frame` permite otro marco que coincida con la configuración del servidor.
 
@@ -81,9 +110,9 @@ ros2 run sura_manipulation_actions plan_bimanual_cartesian_example.py --relative
 # Planificar con límites de velocidad y aceleración al 5 %:
 ros2 run sura_manipulation_actions plan_bimanual_cartesian_example.py \
   --relative-dx 0.01 --velocity-scaling 0.05 --acceleration-scaling 0.05
-# Intercambiar los roles:
+# Intercambiar A y B:
 ros2 run sura_manipulation_actions plan_bimanual_cartesian_example.py \
-  --leader alpha_right --follower alpha_left
+  --arm-a alpha_right --arm-b alpha_left
 ```
 
 El feedback pasa a `waiting_for_execute` después de publicar el plan. El goal sigue abierto hasta ejecutar, cancelar o reemplazar el plan; la trayectoria ya puede consultarse en su tópico y en RViz. Desde otra terminal:
@@ -219,14 +248,14 @@ El launch expande `${robot_namespace}` en los valores del YAML del planificador.
 | `/cirtesub/moveit/monitored_planning_scene` | `moveit_msgs/PlanningScene` |
 | `/cirtesub/moveit/display_planned_path` | `moveit_msgs/DisplayTrajectory` con estado inicial y trayectoria completa |
 | `/cirtesub/bimanual_planner/joint_trajectory` | `trajectory_msgs/JointTrajectory`, salida principal |
-| `/cirtesub/bimanual_planner/leader_path`, `follower_path` | `nav_msgs/Path` alcanzados por FK, expresados en la base/referencia |
-| `/cirtesub/bimanual_planner/relative_path`, `desired_relative_path` | `nav_msgs/Path` relativo alcanzado y deseado, dibujados con offset del líder inicial en la base |
-| `/cirtesub/manipulation/markers` | Un único `visualization_msgs/MarkerArray` por plan con esfera, ejes del objetivo y de las poses finales y líneas del líder, seguidor, relativo planificado y deseado |
+| `/cirtesub/bimanual_planner/arm_a_path`, `arm_b_path` | `nav_msgs/Path` alcanzados por FK, expresados en la base/referencia |
+| `/cirtesub/bimanual_planner/relative_path`, `desired_relative_path` | `nav_msgs/Path` relativo alcanzado y deseado, dibujados con offset del brazo A inicial en la base |
+| `/cirtesub/manipulation/markers` | Un único `visualization_msgs/MarkerArray` por plan con ejes del objetivo y de las poses finales y líneas de los brazos A/B, relativo planificado y deseado |
 
 Las acciones individual y bimanual comparten ese tópico y el mismo
 estilo. El path planificado es verde y el deseado violeta; en bimanual son
 los paths relativos, con el offset explicado abajo. También aparecen el
-líder cian y el seguidor naranja. La línea deseada es más ancha y translúcida
+brazo A cian y el brazo B naranja. La línea deseada es más ancha y translúcida
 para distinguirla cuando coincide con la planificada. Las poses muestran
 X rojo, Y verde y Z azul: objetivo con ejes de 6 cm, poses finales con ejes
 de 4 cm. No se publica la antigua flecha amarilla del objetivo individual.
@@ -234,8 +263,8 @@ de 4 cm. No se publica la antigua flecha amarilla del objetivo individual.
 RViz usa un único display `MarkerArray` para ese tópico común. El publicador
 común envía todas las capas habilitadas del último plan juntas en un solo mensaje
 retenido mediante `transient_local`. Los namespaces
-`bimanual_cartesian/leader_path`, `follower_path`, `planned_path`, `desired_path`,
-`target`, `leader_final`, `follower_final` y `leader_workspace` permiten ocultar
+`bimanual_cartesian/arm_a_path`, `arm_b_path`, `planned_path`, `desired_path`,
+`target`, `arm_a_final` y `arm_b_final` permiten ocultar
 capas. La acción individual usa `cartesian/...`. Un plan nuevo sustituye
 la visualización anterior, aunque sea de otra acción. El nodo común
 `manipulation_marker_visualization` recibe las instantáneas completas en
@@ -254,19 +283,19 @@ Todos los paths y markers se expresan en el frame existente `relative_reference_
 Los paths alcanzados salen de la FK de los waypoints finales temporizados.
 
 Para mantener el dibujo junto a los brazos, los paths relativos llevan la posición
-inicial del líder como offset numérico en ese frame:
-`p_dibujo = p_L_inicial + Δp`. Sus orientaciones siguen representando `ΔR`,
+inicial del brazo A como offset numérico en ese frame:
+`p_dibujo = p_A_inicial + Δp`. Sus orientaciones siguen representando `ΔR`,
 no la orientación absoluta de la pinza. Para recuperar la separación a partir
-del Path, resta la posición inicial del líder expresada en la base. El goal
+del Path, resta la posición inicial del brazo A expresada en la base. El goal
 `relative_target` conserva sus valores `Δp` y `ΔR`, sin ese offset de dibujo.
-El marker del objetivo muestra la pose del seguidor que satisfaría esa relación
-manteniendo la pose inicial del líder; si el líder se mueve, puede diferir de la
+El marker del objetivo muestra la pose del brazo B que satisfaría esa relación
+manteniendo la pose inicial del brazo A; si el brazo A se mueve, puede diferir de la
 pose final real.
 
 Los paths llevan timestamp cero y se refrescan a 10 Hz para que RViz use el TF
 más reciente incluso con `world_ned` como frame fijo. Los markers tienen
 `frame_locked=true`. Si la base se desplaza o gira, la representación acompaña
-a la base; mover la pinza líder no desplaza el origen del dibujo. Se requiere
+a la base; mover la pinza A no desplaza el origen del dibujo. Se requiere
 el TF existente entre la base y el frame fijo de RViz. Cada nuevo plan limpia
 todos los markers anteriores antes de añadir los suyos, dentro del mismo mensaje.
 Las líneas comunes también son frame-locked y no necesitan el
@@ -288,7 +317,7 @@ actualizaciones en `/cirtesub/moveit/planning_scene`.
 
 ## Método y resolución de validación
 
-Los módulos separan contexto de modelo/escena, planificación, visualización y transporte; la temporización tiene su módulo propio y el planificador valida los segmentos geométricos. La optimización secuencial usa Eigen y OSQP (`osqp_vendor`), FK y jacobianos de MoveIt, transformados desde el marco de cada cadena al marco común del modelo. Minimiza error relativo, cambios entre waypoints, movimiento del líder y distancia a la postura nominal. Los pesos no sustituyen la aceptación por límites, esfera, orientación, tolerancias y colisiones.
+Los módulos separan contexto de modelo/escena, planificación, visualización y transporte; la temporización tiene su módulo propio y el planificador valida los segmentos geométricos. La optimización secuencial usa Eigen y OSQP (`osqp_vendor`), FK y jacobianos de MoveIt, transformados desde el marco de cada cadena al marco común del modelo. Minimiza error relativo, cambios entre waypoints, movimiento articular ponderado respecto al inicio y distancia a la postura nominal. Los pesos no sustituyen la aceptación por límites articulares, tolerancias relativas y colisiones.
 
 Se usa la solución anterior como semilla, hasta 100 iteraciones, ocho semillas locales deterministas y seis niveles de subdivisión; el máximo es 2.000 waypoints y se respeta el presupuesto del goal. El suavizado mantiene bloqueado el primer punto y solo acepta cambios que conservan restricciones. Se temporiza con `IterativeParabolicTimeParameterization` y los factores efectivos del goal (defaults Alpha `0.1 / 0.1`); después se valida la curva quíntica que se ejecutará. Puede subdividir, volver a temporizar y dilatar uniformemente el tiempo para cumplir los límites dinámicos. Los puntos incluyen q/v/a y tiempos estrictamente crecientes desde cero.
 
@@ -298,11 +327,11 @@ La validación geométrica tiene resolución numérica finita, no constituye una
 
 ## Pruebas y compilación por el usuario
 
-Se han añadido suites C++ de planificador, transporte y servidor, y regresiones del backend task. Cubren brazos con distinto número de joints, roles intercambiados, restricciones parciales y totales, tolerancias, continuidad, colisiones entre puntos, temporización, FK y visualización, flujo pendiente, backend desactivado, inicio común, rechazo parcial, cancelación y ausencia de reanudación.
+Se han añadido suites C++ de planificador, transporte y servidor, y regresiones del backend task. Cubren brazos con distinto número de joints, A/B intercambiados, reparto del movimiento, pesos iguales, cero e inválidos, límites articulares, tolerancias, continuidad, colisiones entre puntos, temporización, FK y visualización, flujo pendiente, backend desactivado, inicio común, rechazo parcial, cancelación y ausencia de reanudación.
 
 Las regresiones nuevas de referencia en la base incluyen referencia girada,
-orientaciones no conmutativas, cambio de roles, jacobiano relativo al mover el
-líder, rechazo de referencias móviles y validación del frame en el servidor.
+orientaciones no conmutativas, intercambio A/B, jacobiano relativo al mover el
+brazo A, rechazo de referencias móviles y validación del frame en el servidor.
 La implementación de este cambio se comprobó sin compilar; esas pruebas C++
 quedan pendientes de la compilación y ejecución por el usuario.
 
@@ -310,8 +339,8 @@ Desde la raíz del workspace, el usuario puede compilar los paquetes y ejecutar 
 
 ```bash
 cd /home/salva/sura_ws_meta
-colcon build --packages-select sura_manipulation_actions task_priority_kinematic_control cirtesub_description
+colcon build --packages-select sura_manipulation_actions task_priority_kinematic_control_rqt
 source install/setup.bash
-colcon test --packages-select sura_manipulation_actions task_priority_kinematic_control
+colcon test --packages-select sura_manipulation_actions task_priority_kinematic_control_rqt
 colcon test-result --verbose
 ```

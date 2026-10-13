@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <future>
 #include <limits>
 #include <mutex>
@@ -202,8 +203,8 @@ protected:
   PlanAction::Goal goal(bool execute = false, bool swap = false) const
   {
     PlanAction::Goal result;
-    result.leader_arm = swap ? "B" : "A";
-    result.follower_arm = swap ? "A" : "B";
+    result.arm_a = swap ? "B" : "A";
+    result.arm_b = swap ? "A" : "B";
     result.relative_target.header.frame_id = "base";
     result.relative_target.pose.position.x = swap ? -1.99 : 2.01;
     result.relative_target.pose.orientation.w = 1.0;
@@ -289,7 +290,7 @@ TEST_F(CartesianActionServerTest, PlanOnlyPublishesTheRobotTrajectoryAndKeepsGoa
     EXPECT_EQ(relative_view_.header.frame_id, "base");
     EXPECT_EQ(relative_view_.header.stamp.sec, 0);
     EXPECT_EQ(relative_view_.header.stamp.nanosec, 0u);
-    ASSERT_EQ(markers_.markers.size(), 14u);  // Four paths, sphere and three triads.
+    ASSERT_EQ(markers_.markers.size(), 13u);  // Four paths and three triads.
     std::set<std::pair<std::string, int>> marker_keys;
     for (const auto & marker : markers_.markers) {
       EXPECT_TRUE(marker_keys.emplace(marker.ns, marker.id).second)
@@ -348,18 +349,19 @@ TEST_F(CartesianActionServerTest, PlanOnlyPublishesTheRobotTrajectoryAndKeepsGoa
   EXPECT_EQ(finished.code, rclcpp_action::ResultCode::ABORTED);
   ASSERT_TRUE(finished.result);
   EXPECT_FALSE(finished.result->success);
-  EXPECT_FALSE(finished.result->leader_path.poses.empty());
+  EXPECT_FALSE(finished.result->arm_a_path.poses.empty());
   EXPECT_EQ(finished.result->relative_path.header.frame_id,
     finished.result->desired_relative_path.header.frame_id);
   EXPECT_EQ(finished.result->relative_path.header.frame_id, "base");
-  EXPECT_EQ(finished.result->leader_path.header.frame_id, "base");
-  EXPECT_EQ(finished.result->follower_path.header.frame_id, "base");
+  EXPECT_EQ(finished.result->arm_a_path.header.frame_id, "base");
+  EXPECT_EQ(finished.result->arm_b_path.header.frame_id, "base");
   ASSERT_FALSE(finished.result->relative_path.poses.empty());
-  // The drawing offset is the initial leader at -1; the requested delta is 2.01.
+  // The drawing offset is the initial arm_a at -1; the requested delta is 2.01.
   EXPECT_NEAR(finished.result->relative_path.poses.back().pose.position.x, 1.01,
     goal().relative_position_tolerance.x + 1e-6);
   EXPECT_NEAR(finished.result->relative_path.poses.back().pose.position.x,
-    finished.result->follower_path.poses.back().pose.position.x, 1e-9);
+    -1.0 + finished.result->arm_b_path.poses.back().pose.position.x -
+    finished.result->arm_a_path.poses.back().pose.position.x, 1e-9);
   for (const auto & pose : finished.result->relative_path.poses) {
     EXPECT_EQ(pose.header.frame_id, "base");
     EXPECT_EQ(pose.header.stamp.sec, 0);
@@ -378,6 +380,74 @@ TEST_F(CartesianActionServerTest, RejectsToolFrameAndAcceptsTheConfiguredBaseFra
   ASSERT_TRUE(accepted);
   ASSERT_TRUE(waitUntil([this]() {return waiting();}));
   EXPECT_EQ(backend_requests_.load(), 0);
+}
+
+TEST_F(CartesianActionServerTest, ConfigurationRejectsWrongLengthAndInvalidWeights)
+{
+  ASSERT_EQ(server_->deactivate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(static_cast<rclcpp_lifecycle::LifecycleNode &>(*server_).cleanup().id(),
+    lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  const std::vector<std::vector<double>> invalid_weights{
+    {1.0}, {0.0, 0.0, 0.0}, {-1.0, 0.0},
+    {std::numeric_limits<double>::quiet_NaN(), 0.0},
+    {0.0, std::numeric_limits<double>::infinity()}};
+  for (const auto & weights : invalid_weights) {
+    ASSERT_TRUE(server_->set_parameter(rclcpp::Parameter("planning.weights", weights)).successful);
+    EXPECT_EQ(server_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  }
+  ASSERT_TRUE(server_->set_parameter(
+      rclcpp::Parameter("planning.weights", std::vector<double>{0.0, 0.0})).successful);
+  EXPECT_EQ(server_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+}
+
+TEST_F(CartesianActionServerTest, ConfiguredWeightsRemainOnPhysicalJointsWhenArmsAreSwapped)
+{
+  ASSERT_EQ(server_->deactivate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(static_cast<rclcpp_lifecycle::LifecycleNode &>(*server_).cleanup().id(),
+    lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED);
+  ASSERT_TRUE(server_->set_parameter(
+      rclcpp::Parameter("planning.weights", std::vector<double>{100.0, 0.0})).successful);
+  ASSERT_EQ(server_->configure().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE);
+  ASSERT_EQ(server_->activate().id(), lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE);
+  std::vector<double> original_final;
+  for (const bool swap : {false, true}) {
+    {std::lock_guard<std::mutex> lock(observation_mutex_); stage_.clear();}
+    auto target = goal(false, swap);
+    target.relative_target.pose.position.x = swap ? -2.01 : 2.01;
+    target.relative_position_tolerance.x = 0.0;
+    auto handle = sendGoal(target);
+    ASSERT_TRUE(handle);
+    auto result = client_->async_get_result(handle);
+    ASSERT_TRUE(waitUntil([this]() {return waiting();}));
+    if (!swap) {
+      // Parameter changes apply on the next configure, not to this pending plan.
+      ASSERT_TRUE(server_->set_parameter(
+          rclcpp::Parameter("planning.weights", std::vector<double>{0.0, 100.0})).successful);
+      backend_active_.store(true);
+      const auto executed = trigger(execute_);
+      ASSERT_TRUE(executed);
+      ASSERT_TRUE(executed->success) << executed->message;
+    } else {
+      const auto canceled = trigger(cancel_);
+      ASSERT_TRUE(canceled);
+      ASSERT_TRUE(canceled->success);
+    }
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    const auto finished = result.get();
+    ASSERT_TRUE(finished.result);
+    ASSERT_FALSE(finished.result->joint_trajectory.points.empty());
+    const auto & trajectory = finished.result->joint_trajectory;
+    ASSERT_EQ(trajectory.joint_names, (std::vector<std::string>{"left_joint", "right_joint"}));
+    const auto & final = trajectory.points.back().positions;
+    ASSERT_EQ(final.size(), 2u);
+    EXPECT_LT(std::abs(final[0]), 0.25 * std::abs(final[1]));
+    EXPECT_NEAR(final[1] - final[0], 0.01, 1e-6);
+    if (!swap) {original_final = final;}
+    else {
+      EXPECT_NEAR(final[0], original_final[0], 1e-6);
+      EXPECT_NEAR(final[1], original_final[1], 1e-6);
+    }
+  }
 }
 
 TEST_F(CartesianActionServerTest, InactiveBackendRetainsPlanAndManualActivationRequiresNewExecuteTrigger)

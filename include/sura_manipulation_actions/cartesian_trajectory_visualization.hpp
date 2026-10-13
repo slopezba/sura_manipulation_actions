@@ -16,8 +16,8 @@ namespace sura_manipulation_actions
 
 struct CartesianViews
 {
-  nav_msgs::msg::Path leader_path;
-  nav_msgs::msg::Path follower_path;
+  nav_msgs::msg::Path arm_a_path;
+  nav_msgs::msg::Path arm_b_path;
   nav_msgs::msg::Path relative_path;
   nav_msgs::msg::Path desired_relative_path;
 };
@@ -34,8 +34,7 @@ public:
     const std::string & model_frame, Eigen::Isometry3d & transform, std::string & error) const;
   CartesianViews publish(
     const bimanual_cartesian::PlannedTrajectory & plan,
-    const bimanual_cartesian::Arm & leader, const bimanual_cartesian::Arm & follower,
-    double leader_radius);
+    const bimanual_cartesian::Arm & arm_a, const bimanual_cartesian::Arm & arm_b);
   CartesianViews publishSingleArm(
     const bimanual_cartesian::PlannedTrajectory & plan,
     const bimanual_cartesian::Arm & arm);
@@ -55,7 +54,7 @@ private:
   mutable tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr joint_pub_;
-  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr leader_pub_, follower_pub_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr arm_a_pub_, arm_b_pub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr relative_pub_, desired_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
   std::shared_ptr<PathCache> path_cache_;

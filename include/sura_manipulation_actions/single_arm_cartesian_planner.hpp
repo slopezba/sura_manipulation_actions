@@ -6,8 +6,8 @@ namespace sura_manipulation_actions::bimanual_cartesian
 {
 
 // Single-arm entry point to the shared constrained Cartesian solver. In this
-// mode GoalSpec::relative_target is an absolute tip pose in reference_frame;
-// the leader constraints are unused. Only the selected arm's joints participate.
+// mode GoalSpec::relative_target is an absolute tip pose in reference_frame.
+// Only the selected arm's joints participate.
 class SingleArmCartesianPlanner
 {
 public:

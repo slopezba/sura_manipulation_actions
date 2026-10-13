@@ -40,10 +40,8 @@ struct GoalSpec
 {
   // Empty selects the model frame. The reference must not move with either arm.
   std::string reference_frame;
-  // p = p_follower - p_leader, R = R_follower * R_leader^T in reference axes.
+  // p = p_arm_b - p_arm_a, R = R_arm_b * R_arm_a^T in reference axes.
   Eigen::Isometry3d relative_target = Eigen::Isometry3d::Identity();
-  double leader_position_radius = 0.0;
-  Eigen::Vector3d leader_orientation_threshold = Eigen::Vector3d::Zero();
   Eigen::Vector3d relative_position_tolerance = Eigen::Vector3d::Zero();
   Eigen::Vector3d relative_orientation_tolerance = Eigen::Vector3d::Zero();
   double planning_time = 5.0;
@@ -62,7 +60,9 @@ struct Options
   double position_weight = 10.0;
   double orientation_weight = 2.0;
   double continuity_weight = 5.0;
-  double leader_motion_weight = 10.0;
+  // Active variable order of the combined MoveIt group, independent of A/B.
+  // Empty means zero additional movement penalties.
+  std::vector<double> weights;
   double nominal_weight = 0.1;
   double smoothness_weight = 0.5;
   double damping = 0.001;
@@ -88,7 +88,7 @@ struct PlannedTrajectory
   std::vector<double> progress_values;
   std::string reference_frame;
   Eigen::Isometry3d model_from_reference = Eigen::Isometry3d::Identity();
-  Eigen::Isometry3d initial_leader_pose = Eigen::Isometry3d::Identity();
+  Eigen::Isometry3d initial_arm_a_pose = Eigen::Isometry3d::Identity();
   Eigen::Isometry3d initial_relative_pose = Eigen::Isometry3d::Identity();
   Eigen::Isometry3d relative_target = Eigen::Isometry3d::Identity();
 };
@@ -102,8 +102,8 @@ public:
   bool plan(
     const planning_scene::PlanningSceneConstPtr & scene,
     const moveit::core::RobotState & start,
-    const Arm & leader,
-    const Arm & follower,
+    const Arm & arm_a,
+    const Arm & arm_b,
     const Pair & pair,
     const GoalSpec & goal,
     const Options & options,
@@ -114,8 +114,8 @@ public:
 
   bool validatePlan(
     const planning_scene::PlanningSceneConstPtr & scene,
-    const Arm & leader,
-    const Arm & follower,
+    const Arm & arm_a,
+    const Arm & arm_b,
     const Pair & pair,
     const GoalSpec & goal,
     const Options & options,
@@ -137,16 +137,12 @@ public:
     double progress);
 
   static Eigen::Isometry3d relativePoseInReference(
-    const Eigen::Isometry3d & model_from_leader,
-    const Eigen::Isometry3d & model_from_follower,
+    const Eigen::Isometry3d & model_from_arm_a,
+    const Eigen::Isometry3d & model_from_arm_b,
     const Eigen::Isometry3d & model_from_reference);
 
   static Eigen::Vector3d orientationError(
     const Eigen::Matrix3d & target, const Eigen::Matrix3d & current);
-
-  // ZYX decomposition: R_delta = Rz(yaw) Ry(pitch) Rx(roll).
-  static Eigen::Vector3d leaderOrientationDelta(
-    const Eigen::Matrix3d & initial, const Eigen::Matrix3d & current);
 };
 
 }  // namespace sura_manipulation_actions::bimanual_cartesian

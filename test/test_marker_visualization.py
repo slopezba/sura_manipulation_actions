@@ -47,9 +47,9 @@ class MarkerVisualizationTest(unittest.TestCase):
     def setUp(self):
         self.cartesian = plan("cartesian", [("planned_path", 1), ("desired_path", 1),
                                             ("target", 3), ("final", 3)])
-        self.bimanual = plan("bimanual_cartesian", [("leader_path", 1), ("follower_path", 1),
-            ("planned_path", 1), ("desired_path", 1), ("leader_workspace", 1),
-            ("target", 3), ("leader_final", 3), ("follower_final", 3)])
+        self.bimanual = plan("bimanual_cartesian", [("arm_a_path", 1), ("arm_b_path", 1),
+            ("planned_path", 1), ("desired_path", 1),
+            ("target", 3), ("arm_a_final", 3), ("arm_b_final", 3)])
 
     def test_clear_and_complete_plan_share_one_message_with_unique_keys(self):
         for source in (self.cartesian, self.bimanual):
@@ -76,7 +76,7 @@ class MarkerVisualizationTest(unittest.TestCase):
         last_message = node._publisher.publish.call_args.args[0]
         late_display = {}
         apply_snapshot(late_display, last_message)
-        self.assertEqual(len(late_display), 14)
+        self.assertEqual(len(late_display), 13)
         self.assertTrue(all(key[0].startswith("bimanual_cartesian/") for key in late_display))
 
     def test_duplicate_input_is_rejected_without_overwriting_valid_plan(self):
