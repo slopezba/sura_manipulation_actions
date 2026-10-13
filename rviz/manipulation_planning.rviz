@@ -1,44 +1,43 @@
 Panels:
-  - Class: rviz_common/Displays
-    Name: Displays
+- Class: rviz_common/Displays
+  Name: Displays
 Visualization Manager:
-  Class: ""
+  Class: ''
   Displays:
-    - Alpha: 0.5
-      Cell Size: 1
-      Class: rviz_default_plugins/Grid
-      Color: 160; 160; 164
-      Enabled: true
-      Name: Grid
-      Plane: XY
-      Value: true
-    - Class: rviz_default_plugins/TF
-      Enabled: true
-      Name: TF
-      Value: true
-    - Class: rviz_default_plugins/RobotModel
-      Description Source: Topic
-      Description Topic:
-        Value: /cirtesub/robot_description
-      Enabled: true
-      Name: RobotModel
-      Value: true
-      Visual Enabled: true
-      Collision Enabled: true
-    - Class: moveit_rviz_plugin/MotionPlanning
-      Enabled: true
-      Name: MotionPlanning
-      Planned Path:
-        Loop Animation: true
-        Trajectory Topic: /cirtesub/moveit/display_planned_path
-      Planning Scene Topic: /cirtesub/moveit/monitored_planning_scene
-      Value: true
-    - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
-      Name: CollisionDebug
-      Topic:
-        Value: /cirtesub/manipulation/collision_debug
-      Value: true
+  - Class: rviz_default_plugins/Grid
+    Enabled: true
+    Name: Grid
+    Cell Size: 1
+    Plane: XY
+    Alpha: 0.5
+    Color: 160; 160; 164
+    Value: true
+  - Class: rviz_default_plugins/RobotModel
+    Description Source: Topic
+    Description Topic:
+      Value: /cirtesub/robot_description
+    Enabled: true
+    Name: RobotModel
+    Visual Enabled: true
+    Collision Enabled: true
+    Value: true
+  - Class: moveit_rviz_plugin/MotionPlanning
+    Enabled: true
+    Name: MotionPlanning
+    Planning Group: dual_alpha
+    Planning Scene Topic: /cirtesub/moveit/monitored_planning_scene
+    Planned Path:
+      Loop Animation: true
+      Trajectory Topic: /cirtesub/moveit/display_planned_path
+    Value: true
+  - Class: rviz_default_plugins/MarkerArray
+    Enabled: true
+    Name: Action paths, poses and constraints
+    Topic:
+      Value: /cirtesub/manipulation/markers
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+    Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -46,9 +45,9 @@ Visualization Manager:
     Frame Rate: 30
   Name: root
   Tools:
-    - Class: rviz_default_plugins/Interact
-    - Class: rviz_default_plugins/MoveCamera
-    - Class: rviz_default_plugins/Select
+  - Class: rviz_default_plugins/Interact
+  - Class: rviz_default_plugins/MoveCamera
+  - Class: rviz_default_plugins/Select
   Value: true
   Views:
     Current:

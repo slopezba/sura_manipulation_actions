@@ -103,7 +103,7 @@ PlanBimanualJointTrajectoryActionServer::on_configure(const rclcpp_lifecycle::St
   collision_debug_topic_ = getOrDeclareParameter(
     *this,
     "collision_debug_topic",
-    namespacedTopic("manipulation/collision_debug"));
+    namespacedTopic("manipulation/marker_plans"));
   group_name_ = getOrDeclareParameter(*this, "group_name", std::string("dual_alpha"));
   left_controller_action_ = getOrDeclareParameter(
     *this,
@@ -375,7 +375,7 @@ bool PlanBimanualJointTrajectoryActionServer::initializeMoveIt(std::string & err
     collision_debug_pub_ =
       moveit_node_->create_publisher<visualization_msgs::msg::MarkerArray>(
       collision_debug_topic_,
-      rclcpp::SystemDefaultsQoS());
+      rclcpp::QoS(10).reliable());
 
     planning_pipeline_ = std::make_shared<planning_pipeline::PlanningPipeline>(
       model,
@@ -833,7 +833,7 @@ void PlanBimanualJointTrajectoryActionServer::publishCollisionDebug(
   visualization_msgs::msg::Marker marker;
   marker.header.frame_id = frame_id;
   marker.header.stamp = now();
-  marker.ns = "bimanual_collision_state";
+  marker.ns = "bimanual_joint/collision_summary";
   marker.id = 0;
   marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
   marker.action = visualization_msgs::msg::Marker::ADD;

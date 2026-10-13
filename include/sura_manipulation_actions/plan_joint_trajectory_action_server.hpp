@@ -23,6 +23,7 @@
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "sura_manipulation_actions/action/plan_joint_trajectory.hpp"
+#include "sura_manipulation_actions/trajectory_execution.hpp"
 #include "std_srvs/srv/trigger.hpp"
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
@@ -141,9 +142,15 @@ private:
     const std::array<double, 4> & target,
     std::string & error_message,
     double & final_error_norm);
-  trajectory_msgs::msg::JointTrajectory filterTrajectoryForTask(
+  bool executeTransport(
     const ArmConfig & arm,
-    const trajectory_msgs::msg::JointTrajectory & trajectory) const;
+    const trajectory_msgs::msg::JointTrajectory & trajectory,
+    const ExecutionTarget & execution_target,
+    const std::shared_ptr<GoalHandlePlanJointTrajectory> goal_handle,
+    const std::array<double, 4> & target,
+    const std::string & feedback_message,
+    std::string & error_message,
+    double & final_error_norm);
   bool switchControllersForArm(const ArmConfig & arm, std::string & error_message);
   bool switchControllersForTaskExecution(std::string & error_message);
   bool startPendingExecution(std::string & message);
@@ -180,8 +187,7 @@ private:
   std::string namespacedMoveItTopic(const std::string & suffix) const;
 
   rclcpp_action::Server<PlanJointTrajectory>::SharedPtr action_server_;
-  std::shared_ptr<rclcpp_action::Client<FollowJointTrajectory>> left_controller_client_;
-  std::shared_ptr<rclcpp_action::Client<FollowJointTrajectory>> right_controller_client_;
+  std::shared_ptr<TrajectoryExecutor> trajectory_executor_;
   rclcpp::Client<ListControllers>::SharedPtr list_controllers_client_;
   rclcpp::Client<SwitchController>::SharedPtr switch_controller_client_;
   rclcpp::Client<ListControllers>::SharedPtr vehicle_list_client_;
@@ -205,8 +211,6 @@ private:
   std::atomic_bool planning_{false};
   std::atomic_bool executing_{false};
   std::atomic_bool stop_requested_{false};
-  std::shared_ptr<rclcpp_action::Client<FollowJointTrajectory>> active_controller_client_;
-  GoalHandleFollowJointTrajectory::SharedPtr active_controller_goal_;
   std::shared_ptr<GoalHandlePlanJointTrajectory> pending_goal_handle_;
   ArmConfig pending_arm_;
   std::array<double, 4> pending_target_{};

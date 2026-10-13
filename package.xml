@@ -13,14 +13,21 @@
   <depend>ament_index_cpp</depend>
   <depend>control_msgs</depend>
   <depend>controller_manager_msgs</depend>
+  <depend>eigen</depend>
+  <depend>geometry_msgs</depend>
+  <depend>lifecycle_msgs</depend>
   <depend>moveit_core</depend>
   <depend>moveit_msgs</depend>
   <depend>moveit_ros_planning</depend>
+  <depend>nav_msgs</depend>
+  <depend>osqp_vendor</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
   <depend>rclcpp_lifecycle</depend>
   <depend>sensor_msgs</depend>
   <depend>std_srvs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
   <depend>trajectory_msgs</depend>
   <depend>visualization_msgs</depend>
   <depend>yaml-cpp</depend>
@@ -32,13 +39,20 @@
   <exec_depend>moveit_planners_ompl</exec_depend>
   <exec_depend>moveit_hybrid_planning</exec_depend>
   <exec_depend>moveit_ros_visualization</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>rqt_gui</exec_depend>
   <exec_depend>rosidl_default_runtime</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>xacro</exec_depend>
 
   <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
+  <test_depend>shape_msgs</test_depend>
+  <test_depend>srdfdom</test_depend>
+  <test_depend>urdf</test_depend>
 
   <member_of_group>rosidl_interface_packages</member_of_group>
 

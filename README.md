@@ -1,6 +1,15 @@
 # sura_manipulation_actions
 
-Paquete ROS 2 para planificar y ejecutar trayectorias articulares de los manipuladores Alpha de SURA/Cirtesub usando MoveIt 2 y `ros2_control`.
+Paquete ROS 2 para planificar y ejecutar trayectorias de manipuladores usando MoveIt 2 y `ros2_control`. Incluye acciones articulares, cartesianas de un brazo y cartesianas bimanuales configurables.
+
+`manipulation_actions.launch.py` reúne los cuatro servidores principales en un
+solo launch. Puedes añadir `use_rviz:=true use_rqt:=true`; lifecycle y backend
+siguen con activación manual. La nueva pestaña **Cartesian** permite elegir
+brazo y backend (`left_joint_trajectory`/`right_joint_trajectory` o controlador).
+Consulta [la guía cartesiana de un brazo](docs/single_arm_cartesian_planner.md)
+para lanzamiento, configuración, servicios y selección de pose/velocidad.
+
+La nueva acción `PlanBimanualCartesianTrajectory`, su configuración y el flujo de activación manual se describen en [la guía cartesiana bimanual](docs/bimanual_cartesian_planner.md). Los apartados siguientes describen las acciones articulares existentes.
 
 El nodo principal es un `LifecycleNode` que expone una action propia, `PlanJointTrajectory`, para mandar una pose predefinida o una posicion objetivo de 4 articulaciones a un brazo. El servidor:
 
@@ -287,14 +296,46 @@ La configuracion `rviz/manipulation_planning.rviz` incluye:
 - `RobotModel`: `/cirtesub/robot_description`
 - `MotionPlanning`: trayectoria en `/cirtesub/moveit/display_planned_path`
 - `MotionPlanning`: planning scene en `/cirtesub/moveit/monitored_planning_scene`
-- `MarkerArray` de debug de colisiones en `/cirtesub/manipulation/collision_debug`
+- Un único display `MarkerArray` en `/cirtesub/manipulation/markers`: cada acción
+  cartesiana publica sus poses, restricciones y líneas juntas en un solo mensaje.
+  Planificado verde, deseado violeta; en bimanual incluye líder cian y seguidor
+  naranja y la esfera permitida. Las acciones articulares usan también este
+  tópico para el debug de colisiones.
+
+Las acciones cartesianas muestran ejes X rojo, Y verde y Z azul en el objetivo
+(6 cm) y las poses finales (4 cm). Se pueden ocultar las capas por namespace
+en el display. Un plan nuevo, incluso de otra acción, sustituye toda la
+visualización anterior. El nodo `manipulation_marker_visualization` recibe las
+instantáneas completas en `/cirtesub/manipulation/marker_plans` y es el único
+publicador de `/cirtesub/manipulation/markers`. Añade `DELETEALL` con namespace
+vacío e ID reservado al comienzo del mismo mensaje: en RViz, un namespace
+no vacío limitaría el borrado a ese namespace. No se repiten las parejas namespace/ID.
+Su salida fiable `transient_local`, con profundidad 1, conserva solo el último
+plan para RViz, también si se abre después de planificar.
+Los paths usan el frame de la base y
+siguen su TF existente. Los `nav_msgs/Path` individuales continúan disponibles
+para consultar los datos de cada acción sin mezclar los refrescos.
+
+Los launches `manipulation_actions.launch.py` y `manipulation_cartesian_actions.launch.py`
+arrancan este nodo automáticamente. Mantén un solo publicador común por robot;
+si ya está ejecutándose, usa `launch_marker_visualization:=false` en el otro
+launch. Si lanzas los servidores por separado, inicia primero:
+
+```bash
+ros2 run sura_manipulation_actions manipulation_marker_visualization.py \
+  --ros-args -r __ns:=/cirtesub
+```
+
+La entrada contiene eventos nuevos y es volátil: reiniciar únicamente el nodo
+de visualización requiere publicar un nuevo plan. Abrir o reiniciar RViz no
+requiere volver a planificar. No se publica ningún TF adicional.
 
 Si no ves el robot o la trayectoria, comprueba:
 
 ```bash
 ros2 topic echo /cirtesub/moveit/display_planned_path --once
 ros2 topic echo /cirtesub/moveit/monitored_planning_scene --once
-ros2 topic echo /cirtesub/manipulation/collision_debug --once
+ros2 topic echo /cirtesub/manipulation/markers --once
 ```
 
 ## Controladores necesarios
@@ -349,7 +390,7 @@ Planning scene publicado:
 Debug de colisiones:
 
 ```text
-/cirtesub/manipulation/collision_debug
+/cirtesub/manipulation/markers
 ```
 
 ## Parametros importantes
@@ -363,7 +404,7 @@ action_name: /cirtesub/manipulation/plan_joint_trajectory
 joint_states_topic: /cirtesub/alpha/joint_states
 display_trajectory_topic: /cirtesub/moveit/display_planned_path
 planning_scene_topic: /cirtesub/moveit/monitored_planning_scene
-collision_debug_topic: /cirtesub/manipulation/collision_debug
+collision_debug_topic: /cirtesub/manipulation/marker_plans
 predefined_poses_file: share/sura_manipulation_actions/config/predefined_poses.yaml
 left_group_name: alpha_left
 right_group_name: alpha_right

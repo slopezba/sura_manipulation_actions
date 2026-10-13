@@ -1,0 +1,24 @@
+# Absolute pose of the configured arm tip in the configured reference/base frame.
+string arm
+geometry_msgs/PoseStamped target_pose
+geometry_msgs/Vector3 position_tolerance
+geometry_msgs/Vector3 orientation_tolerance
+# Non-positive step/time use server defaults; zero scaling uses server defaults.
+float64 cartesian_step
+float64 planning_time
+float64 velocity_scaling
+float64 acceleration_scaling
+# Empty uses the server default; otherwise "controller" or "task".
+string execution_backend
+# false publishes a plan and waits for execute_pending_trajectory.
+bool execute
+---
+bool success
+string message
+trajectory_msgs/JointTrajectory joint_trajectory
+nav_msgs/Path path
+nav_msgs/Path desired_path
+---
+float32 progress
+string current_stage
+string message

@@ -144,7 +144,7 @@ PlanJointTrajectoryActionServer::on_configure(const rclcpp_lifecycle::State &)
   collision_debug_topic_ = getOrDeclareParameter(
     *this,
     "collision_debug_topic",
-    namespacedTopic("manipulation/collision_debug"));
+    namespacedTopic("manipulation/marker_plans"));
   left_group_name_ = getOrDeclareParameter(*this, "left_group_name", std::string("alpha_left"));
   right_group_name_ = getOrDeclareParameter(*this, "right_group_name", std::string("alpha_right"));
   left_controller_action_ = getOrDeclareParameter(
@@ -288,10 +288,7 @@ PlanJointTrajectoryActionServer::on_configure(const rclcpp_lifecycle::State &)
     return CallbackReturn::FAILURE;
   }
 
-  left_controller_client_ =
-    rclcpp_action::create_client<FollowJointTrajectory>(this, left_controller_action_);
-  right_controller_client_ =
-    rclcpp_action::create_client<FollowJointTrajectory>(this, right_controller_action_);
+  trajectory_executor_ = std::make_shared<TrajectoryExecutor>(this);
   list_controllers_client_ = create_client<ListControllers>(controller_list_service_);
   switch_controller_client_ = create_client<SwitchController>(controller_switch_service_);
   vehicle_list_client_ = create_client<ListControllers>(vehicle_controller_list_service_);
@@ -646,7 +643,7 @@ bool PlanJointTrajectoryActionServer::initializeMoveIt(std::string & error_messa
     collision_debug_pub_ =
       moveit_node_->create_publisher<visualization_msgs::msg::MarkerArray>(
       collision_debug_topic_,
-      rclcpp::SystemDefaultsQoS());
+      rclcpp::QoS(10).reliable());
 
     planning_pipeline_ = std::make_shared<planning_pipeline::PlanningPipeline>(
       model,
@@ -1047,65 +1044,9 @@ bool PlanJointTrajectoryActionServer::sendTrajectoryToController(
   std::string & error_message,
   double & final_error_norm)
 {
-  auto client =
-    arm.canonical_name == "alpha_left" ? left_controller_client_ : right_controller_client_;
-  if (!client->wait_for_action_server(std::chrono::duration<double>(controller_wait_timeout_))) {
-    error_message = "Controller action server is unavailable: " + arm.controller_action;
-    return false;
-  }
-
-  FollowJointTrajectory::Goal controller_goal;
-  controller_goal.trajectory = trajectory;
-  controller_goal.trajectory.header.stamp = now();
-  auto send_options = rclcpp_action::Client<FollowJointTrajectory>::SendGoalOptions();
-  auto goal_future = client->async_send_goal(controller_goal, send_options);
-  if (goal_future.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
-    error_message = "Timed out sending trajectory to controller: " + arm.controller_action;
-    return false;
-  }
-
-  active_controller_goal_ = goal_future.get();
-  if (!active_controller_goal_) {
-    error_message = "Controller rejected trajectory goal: " + arm.controller_action;
-    return false;
-  }
-  active_controller_client_ = client;
-
-  rclcpp::Rate rate(std::max(1.0, execution_feedback_rate_));
-  auto result_future = client->async_get_result(active_controller_goal_);
-  while (rclcpp::ok()) {
-    if (stop_requested_ || goal_handle->is_canceling()) {
-      client->async_cancel_goal(active_controller_goal_);
-      error_message = "Trajectory execution canceled";
-      return false;
-    }
-
-    publishFeedback(goal_handle, arm, target, "executing", "Executing approved manipulation trajectory");
-    if (result_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-      const auto wrapped_result = result_future.get();
-      moveit::core::RobotState current_state(planning_scene_monitor_->getRobotModel());
-      std::string state_error;
-      if (getCurrentState(current_state, state_error)) {
-        final_error_norm = computeErrorNorm(computeJointError(current_state, arm, target));
-      }
-      if (wrapped_result.code == rclcpp_action::ResultCode::SUCCEEDED) {
-        return true;
-      }
-      error_message =
-        "Controller failed trajectory execution with result code " +
-        std::to_string(static_cast<int>(wrapped_result.code));
-      if (wrapped_result.result) {
-        error_message += " and controller error code " +
-          std::to_string(wrapped_result.result->error_code);
-      }
-      return false;
-    }
-
-    rate.sleep();
-  }
-
-  error_message = "ROS shutdown during trajectory execution";
-  return false;
+  return executeTransport(
+    arm, trajectory, {arm.canonical_name, arm.controller_action, arm.joint_names},
+    goal_handle, target, "Executing approved manipulation trajectory", error_message, final_error_norm);
 }
 
 bool PlanJointTrajectoryActionServer::sendTrajectoryToTask(
@@ -1116,122 +1057,50 @@ bool PlanJointTrajectoryActionServer::sendTrajectoryToTask(
   std::string & error_message,
   double & final_error_norm)
 {
-  const std::string action_name =
-    arm.canonical_name == "alpha_left" ? left_task_action_ : right_task_action_;
-  auto client = rclcpp_action::create_client<FollowJointTrajectory>(this, action_name);
-  if (!client->wait_for_action_server(std::chrono::duration<double>(controller_wait_timeout_))) {
-    error_message = "Task trajectory action server is unavailable: " + action_name;
-    return false;
-  }
-
-  FollowJointTrajectory::Goal task_goal;
-  task_goal.trajectory = filterTrajectoryForTask(arm, trajectory);
-  task_goal.trajectory.header.stamp = now();
-  if (task_goal.trajectory.points.empty()) {
-    error_message = "Filtered task trajectory is empty";
-    return false;
-  }
-
-  auto goal_future = client->async_send_goal(task_goal);
-  if (goal_future.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
-    error_message = "Timed out sending trajectory to task action: " + action_name;
-    return false;
-  }
-
-  active_controller_goal_ = goal_future.get();
-  if (!active_controller_goal_) {
-    error_message = "Task rejected trajectory goal: " + action_name;
-    return false;
-  }
-  active_controller_client_ = client;
-
-  rclcpp::Rate rate(std::max(1.0, execution_feedback_rate_));
-  auto result_future = client->async_get_result(active_controller_goal_);
-  while (rclcpp::ok()) {
-    if (stop_requested_ || goal_handle->is_canceling()) {
-      client->async_cancel_goal(active_controller_goal_);
-      error_message = "Task trajectory execution canceled";
-      return false;
-    }
-
-    publishFeedback(goal_handle, arm, target, "executing", "Executing trajectory through task priority");
-    if (result_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-      const auto wrapped_result = result_future.get();
-      moveit::core::RobotState current_state(planning_scene_monitor_->getRobotModel());
-      std::string state_error;
-      if (getCurrentState(current_state, state_error)) {
-        final_error_norm = computeErrorNorm(computeJointError(current_state, arm, target));
-      }
-      if (wrapped_result.code == rclcpp_action::ResultCode::SUCCEEDED) {
-        return true;
-      }
-      error_message =
-        "Task failed trajectory execution with result code " +
-        std::to_string(static_cast<int>(wrapped_result.code));
-      if (wrapped_result.result) {
-        error_message += " and task error code " +
-          std::to_string(wrapped_result.result->error_code) + ": " +
-          wrapped_result.result->error_string;
-      }
-      return false;
-    }
-
-    rate.sleep();
-  }
-
-  error_message = "ROS shutdown during task trajectory execution";
-  return false;
+  const bool left = arm.canonical_name == "alpha_left";
+  const ExecutionTarget task{
+    arm.canonical_name, left ? left_task_action_ : right_task_action_,
+    left ? left_task_joint_names_ : right_task_joint_names_};
+  return executeTransport(
+    arm, trajectory, task, goal_handle, target,
+    "Executing trajectory through task priority", error_message, final_error_norm);
 }
 
-trajectory_msgs::msg::JointTrajectory PlanJointTrajectoryActionServer::filterTrajectoryForTask(
+bool PlanJointTrajectoryActionServer::executeTransport(
   const ArmConfig & arm,
-  const trajectory_msgs::msg::JointTrajectory & trajectory) const
+  const trajectory_msgs::msg::JointTrajectory & trajectory,
+  const ExecutionTarget & execution_target,
+  const std::shared_ptr<GoalHandlePlanJointTrajectory> goal_handle,
+  const std::array<double, kAlphaJointCount> & target,
+  const std::string & feedback_message,
+  std::string & error_message,
+  double & final_error_norm)
 {
-  const auto & task_joint_names =
-    arm.canonical_name == "alpha_left" ? left_task_joint_names_ : right_task_joint_names_;
-  if (task_joint_names.empty()) {
-    return trajectory;
+  if (!trajectory_executor_) {
+    error_message = "Trajectory transport is not configured";
+    return false;
   }
-
-  trajectory_msgs::msg::JointTrajectory filtered;
-  filtered.header = trajectory.header;
-  filtered.joint_names = task_joint_names;
-
-  std::vector<size_t> indices;
-  indices.reserve(task_joint_names.size());
-  for (const auto & joint_name : task_joint_names) {
-    const auto it = std::find(trajectory.joint_names.begin(), trajectory.joint_names.end(), joint_name);
-    if (it == trajectory.joint_names.end()) {
-      return trajectory_msgs::msg::JointTrajectory();
+  ExecutionOptions options;
+  options.controller_wait_timeout = controller_wait_timeout_;
+  options.acceptance_timeout = 5.0;
+  options.start_delay = 0.0;
+  options.execution_wait_margin = 5.0;
+  options.feedback_rate = std::max(1.0, execution_feedback_rate_);
+  const auto execution = trajectory_executor_->execute(
+    trajectory, {execution_target}, options,
+    [this, goal_handle]() { return stop_requested_.load() || goal_handle->is_canceling(); },
+    [this, goal_handle, arm, target, feedback_message]() {
+      publishFeedback(goal_handle, arm, target, "executing", feedback_message);
+    });
+  if (execution.accepted) {
+    moveit::core::RobotState current_state(planning_scene_monitor_->getRobotModel());
+    std::string state_error;
+    if (getCurrentState(current_state, state_error)) {
+      final_error_norm = computeErrorNorm(computeJointError(current_state, arm, target));
     }
-    indices.push_back(static_cast<size_t>(std::distance(trajectory.joint_names.begin(), it)));
   }
-
-  filtered.points.reserve(trajectory.points.size());
-  for (const auto & point : trajectory.points) {
-    trajectory_msgs::msg::JointTrajectoryPoint filtered_point;
-    filtered_point.time_from_start = point.time_from_start;
-    filtered_point.positions.reserve(indices.size());
-    filtered_point.velocities.reserve(indices.size());
-    filtered_point.accelerations.reserve(indices.size());
-    filtered_point.effort.reserve(indices.size());
-    for (const auto index : indices) {
-      if (index < point.positions.size()) {
-        filtered_point.positions.push_back(point.positions[index]);
-      }
-      if (index < point.velocities.size()) {
-        filtered_point.velocities.push_back(point.velocities[index]);
-      }
-      if (index < point.accelerations.size()) {
-        filtered_point.accelerations.push_back(point.accelerations[index]);
-      }
-      if (index < point.effort.size()) {
-        filtered_point.effort.push_back(point.effort[index]);
-      }
-    }
-    filtered.points.push_back(filtered_point);
-  }
-  return filtered;
+  error_message = execution.success ? std::string{} : execution.message;
+  return execution.success;
 }
 
 bool PlanJointTrajectoryActionServer::switchControllersForArm(
@@ -1687,7 +1556,7 @@ void PlanJointTrajectoryActionServer::publishCollisionDebug(
   visualization_msgs::msg::Marker text;
   text.header.frame_id = frame_id;
   text.header.stamp = now();
-  text.ns = "collision_summary";
+  text.ns = "joint/collision_summary";
   text.id = 0;
   text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
   text.action = visualization_msgs::msg::Marker::ADD;
@@ -1711,17 +1580,13 @@ void PlanJointTrajectoryActionServer::requestStop()
   if (planning_pipeline_) {
     planning_pipeline_->terminate();
   }
-  auto goal = active_controller_goal_;
-  auto client = active_controller_client_;
-  if (goal && client) {
-    client->async_cancel_goal(goal);
+  if (trajectory_executor_) {
+    trajectory_executor_->cancel();
   }
 }
 
 void PlanJointTrajectoryActionServer::finishExecution()
 {
-  active_controller_client_.reset();
-  active_controller_goal_.reset();
   stop_requested_.store(false);
   executing_.store(false);
 }
@@ -1845,8 +1710,7 @@ void PlanJointTrajectoryActionServer::cleanupResources()
   robot_model_loader_.reset();
   display_trajectory_pub_.reset();
   collision_debug_pub_.reset();
-  left_controller_client_.reset();
-  right_controller_client_.reset();
+  trajectory_executor_.reset();
   list_controllers_client_.reset();
   switch_controller_client_.reset();
   vehicle_list_client_.reset();

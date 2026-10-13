@@ -1,0 +1,73 @@
+/**:
+  ros__parameters:
+    # These substitutions are expanded by the Cartesian launch, not by ROS itself.
+    robot_namespace: cirtesub
+    relative_reference_frame: ${robot_namespace}/base_link
+    execution_backend: controller
+    joint_states_topic: /${robot_namespace}/alpha/joint_states
+    arm_names: [alpha_left, alpha_right]
+    pair_names: [dual_alpha]
+    arms.alpha_left.group: alpha_left
+    arms.alpha_left.tip_frame: ${robot_namespace}/alpha_left/standard_jaws_tool
+    arms.alpha_left.controller_action: /${robot_namespace}/alpha/controller/alpha_left_joint_trajectory_controller/follow_joint_trajectory
+    arms.alpha_left.controller_name: alpha_left_joint_trajectory_controller
+    arms.alpha_left.manager_service: /${robot_namespace}/alpha/controller/controller_manager/list_controllers
+    arms.alpha_right.group: alpha_right
+    arms.alpha_right.tip_frame: ${robot_namespace}/alpha_right/standard_jaws_tool
+    arms.alpha_right.controller_action: /${robot_namespace}/alpha/controller/alpha_right_joint_trajectory_controller/follow_joint_trajectory
+    arms.alpha_right.controller_name: alpha_right_joint_trajectory_controller
+    arms.alpha_right.manager_service: /${robot_namespace}/alpha/controller/controller_manager/list_controllers
+    pairs.dual_alpha.arms: [alpha_left, alpha_right]
+    pairs.dual_alpha.group: dual_alpha
+    pairs.dual_alpha.task_action: /${robot_namespace}/controller/task_priority/tasks/bimanual_joint_trajectory/follow_joint_trajectory
+    pairs.dual_alpha.task_controller_name: task_priority_controller
+    pairs.dual_alpha.task_manager_service: /${robot_namespace}/alpha/controller/controller_manager/list_controllers
+    current_state_timeout: 2.0
+    current_state_max_age: 2.0
+    planning.default_planning_time: 5.0
+    planning.cartesian_step: 0.005
+    planning.angular_step: 0.05
+    planning.max_iterations: 100
+    planning.max_waypoints: 2000
+    planning.recovery_seeds: 8
+    planning.max_subdivision_depth: 6
+    planning.position_weight: 10.0
+    planning.orientation_weight: 2.0
+    planning.continuity_weight: 5.0
+    planning.leader_motion_weight: 0.0
+    planning.nominal_weight: 0.1
+    planning.smoothness_weight: 0.5
+    planning.optimize_trajectory: true
+    planning.smoothing_passes: 2
+    planning.velocity_scaling: 0.1
+    planning.acceleration_scaling: 0.1
+    planning.validation_joint_step: 0.01
+    planning.validation_prismatic_step: 0.001
+    planning.validation_time_step: 0.01
+    planning.position_epsilon: 0.000001
+    planning.orientation_epsilon: 0.000001
+    # From tasks.joint_limits in ros2_control_params_dual_alpha.yaml. These
+    # tighten the loaded model only for this planner; old actions are unchanged.
+    planning.limit_joint_names:
+      - ${robot_namespace}/alpha_left/axis_b
+      - ${robot_namespace}/alpha_left/axis_c
+      - ${robot_namespace}/alpha_left/axis_d
+      - ${robot_namespace}/alpha_left/axis_e
+      - ${robot_namespace}/alpha_right/axis_b
+      - ${robot_namespace}/alpha_right/axis_c
+      - ${robot_namespace}/alpha_right/axis_d
+      - ${robot_namespace}/alpha_right/axis_e
+    planning.lower_limits: [0.0, 0.0, 0.0, 1.57, 0.0, 0.0, 0.0, 1.57]
+    planning.upper_limits: [6.10, 3.22, 3.49, 4.71, 6.10, 3.22, 3.49, 4.71]
+    visualization.fixed_frame: world_ned
+    visualization.publish_paths: true
+    visualization.publish_markers: true
+    execution.controller_wait_timeout: 5.0
+    execution.acceptance_timeout: 2.0
+    execution.start_delay: 3.0
+    execution.wait_margin: 5.0
+    execution.feedback_rate: 10.0
+    execution.start_joint_tolerance: 0.001
+    execution.start_prismatic_tolerance: 0.0001
+    execution.base_position_tolerance: 0.05
+    execution.base_orientation_tolerance: 0.1
