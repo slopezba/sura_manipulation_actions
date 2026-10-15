@@ -265,6 +265,7 @@ ExecutionResult TrajectoryExecutor::execute(
     if (options.use_common_start_stamp) {
       start_stamp = clock_->now() + rclcpp::Duration::from_seconds(options.start_delay);
     }
+    if (options.on_start) {options.on_start(start_stamp);}
     // All requests are dispatched before waiting for any goal acceptance or result.
     for (size_t index = 0; index < targets.size(); ++index) {
       if (is_canceled()) {
@@ -274,6 +275,15 @@ ExecutionResult TrajectoryExecutor::execute(
       Action::Goal goal;
       goal.trajectory = std::move(partitions[index]);
       goal.trajectory.header.stamp = start_stamp;
+      for (const auto & tolerance : options.path_tolerance) {
+        if (std::find(goal.trajectory.joint_names.begin(), goal.trajectory.joint_names.end(), tolerance.name) !=
+          goal.trajectory.joint_names.end()) {goal.path_tolerance.push_back(tolerance);}
+      }
+      for (const auto & tolerance : options.goal_tolerance) {
+        if (std::find(goal.trajectory.joint_names.begin(), goal.trajectory.joint_names.end(), tolerance.name) !=
+          goal.trajectory.joint_names.end()) {goal.goal_tolerance.push_back(tolerance);}
+      }
+      goal.goal_time_tolerance = options.goal_time_tolerance;
       typename Client::SendGoalOptions send_options;
       // Keep this action client registered even if the owner cleans up while a
       // delayed admission reply is pending. The client releases this callback

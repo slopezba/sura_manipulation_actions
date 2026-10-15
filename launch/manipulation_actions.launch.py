@@ -57,6 +57,7 @@ def _setup(context):
         joint["joint_states_topic"] = arg("joint_states_topic")
     pipelines = [os.path.join(moveit_share, arg(name)) for name in ("planning_pipelines_file", "ompl_planning_file")]
     actions = []
+    marker_parameters = {"robot_namespace": namespace, "use_sim_time": enabled("use_sim_time")}
     if enabled("launch_marker_visualization"):
         actions.append(Node(package="sura_manipulation_actions",
             executable="manipulation_marker_visualization.py",
@@ -98,7 +99,18 @@ def _setup(context):
                                       ("alpha_right", right_task, arg("right_task_action"))):
             if explicit and f"arms.{arm}.task_action" in config:
                 config[f"arms.{arm}.task_action"] = endpoint
+        mode = "bimanual" if flag == "launch_bimanual_cartesian" else "cartesian"
+        selected = config["arm_names"][:2 if mode == "bimanual" else 1]
+        marker_parameters.update({
+            f"{mode}.arm_names": selected,
+            f"{mode}.tool_frames": [config[f"arms.{arm}.tip_frame"] for arm in selected],
+            f"{mode}.reference_frame": config.get(reference_key,
+                f"{namespace}/base_link".lstrip("/") if mode == "bimanual" else "world_ned"),
+        })
         server(executable, [robot, limits, kinematics, config])
+    if enabled("launch_planning_markers") and (enabled("launch_cartesian") or enabled("launch_bimanual_cartesian")):
+        actions.append(Node(package="task_priority_kinematic_control_rqt", executable="planning_marker_server",
+            name="planning_marker_server", output="screen", parameters=[marker_parameters]))
     if enabled("launch_hybrid"):
         arguments = {name: arg(name) for name in ("robot_namespace", "robot_description_package", "robot_description_file",
             "robot_description_semantic_package", "robot_description_semantic_file", "execution_backend", "use_sim_time")}
@@ -123,7 +135,7 @@ def generate_launch_description():
         "robot_description_package": "cirtesub_description", "robot_description_file": "urdf/cirtesub_dual_alpha.urdf.xacro",
         "robot_description_semantic_package": "cirtesub_description", "robot_description_semantic_file": "moveit2/cirtesub_dual_alpha.srdf.xacro",
         "xacro_arguments": "robot_name:=${robot_namespace} environment:=sim arms:=dual use_sim:=true alpha_desired_joint_states_topic:=/${robot_namespace}/alpha/desired_joint_states alpha_joint_states_topic:=/${robot_namespace}/stonefish/alpha/joint_states alpha_normalized_joint_states_topic:=/${robot_namespace}/alpha/joint_states",
-        "srdf_xacro_arguments": "robot_name:=${robot_namespace}", "moveit_config_package": "cirtesub_description",
+        "srdf_xacro_arguments": "robot_name:=${robot_namespace} floating_base:=true world_frame:=world_ned", "moveit_config_package": "cirtesub_description",
         "planning_pipelines_file": "moveit2/planning_pipelines.yaml", "ompl_planning_file": "moveit2/ompl_planning.yaml",
         "joint_limits_file": "moveit2/joint_limits.yaml", "kinematics_file": "moveit2/kinematics.yaml",
         "predefined_poses_file": os.path.join(share, "config", "predefined_poses.yaml"),
@@ -137,6 +149,7 @@ def generate_launch_description():
         "rviz_config_file": os.path.join(share, "rviz", "manipulation_planning.rviz"),
         "launch_joint": "true", "launch_bimanual_joint": "true", "launch_cartesian": "true", "launch_bimanual_cartesian": "true", "launch_hybrid": "false",
         "launch_marker_visualization": "true",
+        "launch_planning_markers": "true",
     }
     return LaunchDescription([*[DeclareLaunchArgument(name, default_value=value) for name, value in defaults.items()],
                               OpaqueFunction(function=_setup)])

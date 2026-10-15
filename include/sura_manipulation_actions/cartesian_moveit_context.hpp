@@ -13,6 +13,9 @@
 #include "moveit_msgs/msg/display_trajectory.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"
+#include "tf2_ros/buffer.h"
+#include "tf2_ros/transform_listener.h"
 
 namespace sura_manipulation_actions
 {
@@ -34,6 +37,12 @@ public:
     planning_scene::PlanningScenePtr & scene, std::string & error,
     const std::function<bool()> & canceled = {}) const;
   void display(const robot_trajectory::RobotTrajectory & trajectory) const;
+  // Resolve input and floating base at one common TF instant, then freeze them.
+  bool transformTarget(
+    planning_scene::PlanningScenePtr & scene,
+    const geometry_msgs::msg::PoseStamped & target, double max_age,
+    Eigen::Isometry3d & model_target, Eigen::Isometry3d & model_from_reference,
+    std::string & error) const;
 
 private:
   struct Observation
@@ -51,6 +60,8 @@ private:
   std::thread spin_thread_;
   mutable std::mutex observation_mutex_;
   std::map<std::string, Observation> observations_;
+  std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
 };
 
 }  // namespace sura_manipulation_actions

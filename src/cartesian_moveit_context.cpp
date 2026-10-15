@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "moveit/robot_state/conversions.h"
+#include "tf2/exceptions.h"
 
 namespace sura_manipulation_actions
 {
@@ -36,6 +37,10 @@ bool CartesianMoveItContext::start(
     loader_ = std::make_shared<robot_model_loader::RobotModelLoader>(node_, "robot_description");
     model_ = loader_->getModel();
     if (!model_) {error = "MoveIt could not load robot_description / SRDF"; return false;}
+    tf_buffer_ = std::make_unique<tf2_ros::Buffer>(node_->get_clock());
+    // Timestamped Buffer lookups use the timeout-capable overload. Let the
+    // listener service TF independently and enable the buffer's dedicated-thread flag.
+    tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_, node_, true);
     monitor_ = std::make_shared<planning_scene_monitor::PlanningSceneMonitor>(node_, loader_);
     if (!monitor_->getPlanningScene()) {error = "MoveIt planning scene unavailable"; return false;}
     observation_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
@@ -112,7 +117,36 @@ bool CartesianMoveItContext::snapshot(
         scene->decoupleParent();
         auto & state = scene->getCurrentStateNonConst();
         state.setVariablePositions(positions);
+        if (model_->getRootJoint()->getType() == moveit::core::JointModel::FLOATING) {
+          try {
+            const auto base = tf_buffer_->lookupTransform(
+              model_->getModelFrame(), model_->getRootLinkName(), tf2::TimePointZero);
+            const rclcpp::Time stamp(base.header.stamp, node_->get_clock()->get_clock_type());
+            if (stamp.nanoseconds() != 0 && std::abs((node_->now() - stamp).seconds()) > max_age) {
+              error = "Missing or stale floating-base TF";
+              std::this_thread::sleep_for(std::chrono::milliseconds(10));
+              continue;
+            }
+            const auto & t = base.transform.translation;
+            const auto & q = base.transform.rotation;
+            Eigen::Quaterniond rotation(q.w, q.x, q.y, q.z);
+            if (!rotation.coeffs().allFinite() || rotation.norm() < 1e-12 ||
+              !Eigen::Vector3d(t.x, t.y, t.z).allFinite()) {
+              error = "Floating-base TF is not finite";
+              return false;
+            }
+            Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+            pose.translation() = Eigen::Vector3d(t.x, t.y, t.z);
+            pose.linear() = rotation.normalized().toRotationMatrix();
+            state.setJointPositions(model_->getRootJoint(), pose);
+          } catch (const tf2::TransformException & ex) {
+            error = std::string("Floating-base TF unavailable: ") + ex.what();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+          }
+        }
         state.update();
+        error.clear();
         return true;
       }
       error = "Planning scene unavailable";
@@ -122,6 +156,63 @@ bool CartesianMoveItContext::snapshot(
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   } while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline);
   return false;
+}
+
+bool CartesianMoveItContext::transformTarget(
+  planning_scene::PlanningScenePtr & scene,
+  const geometry_msgs::msg::PoseStamped & target, double max_age,
+  Eigen::Isometry3d & model_target, Eigen::Isometry3d & model_from_reference,
+  std::string & error) const
+{
+  try {
+    const auto clock_type = node_->get_clock()->get_clock_type();
+    const auto frame = target.header.frame_id.empty() ? model_->getModelFrame() : target.header.frame_id;
+    rclcpp::Time stamp(target.header.stamp, clock_type);
+    const bool floating = model_->getRootJoint()->getType() == moveit::core::JointModel::FLOATING;
+    if (stamp.nanoseconds() == 0) {
+      // Select the oldest latest dynamic stamp, then read every transform there.
+      for (const auto & source : {frame, floating ? model_->getRootLinkName() : model_->getModelFrame()}) {
+        if (source == model_->getModelFrame()) {continue;}
+        const auto latest = tf_buffer_->lookupTransform(model_->getModelFrame(), source, tf2::TimePointZero);
+        const rclcpp::Time candidate(latest.header.stamp, clock_type);
+        if (candidate.nanoseconds() && (!stamp.nanoseconds() || candidate < stamp)) {stamp = candidate;}
+      }
+    }
+    if (stamp.nanoseconds() && std::abs((node_->now() - stamp).seconds()) > max_age) {
+      error = "Target/base TF timestamp is outside current_state_max_age";
+      return false;
+    }
+    auto transform = [&](const std::string & source) {
+        Eigen::Isometry3d result = Eigen::Isometry3d::Identity();
+        if (source == model_->getModelFrame()) {return result;}
+        const auto msg = tf_buffer_->lookupTransform(model_->getModelFrame(), source, stamp);
+        const auto & t = msg.transform.translation;
+        const auto & q = msg.transform.rotation;
+        Eigen::Quaterniond rotation(q.w, q.x, q.y, q.z);
+        if (!rotation.coeffs().allFinite() || rotation.norm() < 1e-12 ||
+          !Eigen::Vector3d(t.x, t.y, t.z).allFinite()) {throw std::runtime_error("Invalid TF transform");}
+        result.translation() = Eigen::Vector3d(t.x, t.y, t.z);
+        result.linear() = rotation.normalized().toRotationMatrix();
+        return result;
+      };
+    model_from_reference = transform(frame);
+    const auto & p = target.pose.position;
+    const auto & q = target.pose.orientation;
+    Eigen::Isometry3d input = Eigen::Isometry3d::Identity();
+    input.translation() = Eigen::Vector3d(p.x, p.y, p.z);
+    input.linear() = Eigen::Quaterniond(q.w, q.x, q.y, q.z).normalized().toRotationMatrix();
+    model_target = model_from_reference * input;
+    if (floating) {
+      auto & state = scene->getCurrentStateNonConst();
+      state.setJointPositions(model_->getRootJoint(), transform(model_->getRootLinkName()));
+      state.update();
+    }
+    error.clear();
+    return true;
+  } catch (const std::exception & ex) {
+    error = std::string("Resolving target/base frames: ") + ex.what();
+    return false;
+  }
 }
 
 void CartesianMoveItContext::display(const robot_trajectory::RobotTrajectory & trajectory) const

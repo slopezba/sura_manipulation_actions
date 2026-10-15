@@ -1,0 +1,29 @@
+# Adapt the target and limits to the measured robot state before sending.
+arm: alpha_left
+target_pose:
+  header:
+    frame_id: cirtesub/base_link
+  pose:
+    position: {x: 0.8, y: 0.0, z: 0.4}
+    orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+position_tolerance: {x: 0.002, y: 0.002, z: 0.002}
+orientation_tolerance: {x: 0.03, y: 0.03, z: 0.03}
+available_dofs: [true, true, true, false, false, true, true, true, true, true]
+base_limits:
+  lower_limits: [-0.5, -0.5, -0.3, -0.35, -0.35, -3.141592653589793]
+  upper_limits: [0.5, 0.5, 0.3, 0.35, 0.35, 3.141592653589793]
+  max_velocity: [0.2, 0.2, 0.2, 0.3, 0.3, 0.3]
+  max_acceleration: [0.2, 0.2, 0.2, 0.3, 0.3, 0.3]
+tracking_tolerances:
+  base_path: [0.05, 0.05, 0.05, 0.1, 0.1, 0.1]
+  base_goal: [0.05, 0.05, 0.05, 0.1, 0.1, 0.1]
+  joint_path: [0.05, 0.05, 0.05, 0.05]
+  joint_goal: [0.05, 0.05, 0.05, 0.05]
+  tip_path: [0.002, 0.002, 0.002, 0.03, 0.03, 0.03]
+  tip_goal: [0.002, 0.002, 0.002, 0.03, 0.03, 0.03]
+  goal_time_tolerance: {sec: 0, nanosec: 500000000}
+planning_time: 10.0
+velocity_scaling: 0.1
+acceleration_scaling: 0.1
+execution_backend: task
+execute: false

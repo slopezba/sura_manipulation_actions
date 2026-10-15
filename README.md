@@ -4,8 +4,13 @@ Paquete ROS 2 para planificar y ejecutar trayectorias de manipuladores usando Mo
 
 `manipulation_actions.launch.py` reúne los cuatro servidores principales en un
 solo launch. Puedes añadir `use_rviz:=true use_rqt:=true`; lifecycle y backend
-siguen con activación manual. La nueva pestaña **Cartesian** permite elegir
-brazo y backend (`left_joint_trajectory`/`right_joint_trajectory` o controlador).
+siguen con activación manual. La pestaña **Cartesian** permite elegir brazo,
+frame, ejes disponibles de base/articulaciones y límites por goal. El backend
+`task` coordina `BasePoseTrajectoryTask` con la trayectoria del brazo y mantiene
+la pose final; el backend `controller` admite movimientos con base bloqueada.
+El backend `pose`, seleccionable como **Pose** en RQT, publica poses de
+`standard_jaws_tool` directamente en `left_pose` o `right_pose` y deja que la
+jerarquía resuelva el movimiento, sin IK ni validación previa de colisiones.
 Consulta [la guía cartesiana de un brazo](docs/single_arm_cartesian_planner.md)
 para lanzamiento, configuración, servicios y selección de pose/velocidad.
 

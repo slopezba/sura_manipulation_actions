@@ -51,6 +51,7 @@ def generate_launch_description():
                     " ",
                     "robot_name:=",
                     robot_namespace,
+                    " floating_base:=true world_frame:=world_ned",
                 ]
             ),
             value_type=str,

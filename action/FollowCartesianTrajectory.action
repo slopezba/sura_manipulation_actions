@@ -1,0 +1,23 @@
+# Controller-side atomic execution, not an additional planning interface.
+string arm
+string tip_frame
+bool[] available_dofs
+# All poses and the base trajectory are expressed in the controller world frame.
+# XYZ motion bounds remain anchored to this planning reference, even if pending.
+geometry_msgs/PoseStamped base_reference_pose
+geometry_msgs/PoseStamped target_pose
+geometry_msgs/PoseStamped tolerance_reference_pose
+trajectory_msgs/JointTrajectory joint_trajectory
+trajectory_msgs/MultiDOFJointTrajectory base_trajectory
+BaseMotionLimits base_limits
+TrajectoryTrackingTolerances tracking_tolerances
+---
+bool success
+string message
+---
+float32 progress
+string current_stage
+string message
+float64[6] base_error
+float64[] joint_error
+float64[6] tip_error

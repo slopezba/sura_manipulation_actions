@@ -4,6 +4,7 @@
 #include <moveit/robot_state/robot_state.h>
 #include <moveit/robot_trajectory/robot_trajectory.h>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
+#include <trajectory_msgs/msg/multi_dof_joint_trajectory.hpp>
 
 #include <Eigen/Geometry>
 
@@ -25,6 +26,8 @@ struct Arm
   std::string controller_name;
   std::string manager_service;
   std::vector<std::string> joint_names;
+  // Optional group containing this arm and the floating vehicle root.
+  std::string whole_body_group_name;
 };
 
 struct Pair
@@ -46,6 +49,17 @@ struct GoalSpec
   Eigen::Vector3d relative_orientation_tolerance = Eigen::Vector3d::Zero();
   double planning_time = 5.0;
   double cartesian_step = 0.005;
+  // Single-arm order: world XYZ, world ZYX Euler roll/pitch/yaw, arm joints.
+  // Empty fixes the base and permits every selected-arm articulation.
+  std::vector<bool> available_dofs;
+  // Absolute targets and nominal paths remain in reference_frame. Cartesian
+  // tolerances are evaluated in these fixed, snapshot world axes.
+  Eigen::Isometry3d world_from_tolerance = Eigen::Isometry3d::Identity();
+  // Resolved absolute XYZ/RPY limits; empty means no additional pose bounds.
+  std::vector<double> base_lower_limits;
+  std::vector<double> base_upper_limits;
+  std::vector<double> base_velocity_limits;
+  std::vector<double> base_acceleration_limits;
 };
 
 struct Options
@@ -60,7 +74,7 @@ struct Options
   double position_weight = 10.0;
   double orientation_weight = 2.0;
   double continuity_weight = 5.0;
-  // Active variable order of the combined MoveIt group, independent of A/B.
+  // Active arm variable order of the combined MoveIt group, independent of A/B.
   // Empty means zero additional movement penalties.
   std::vector<double> weights;
   double nominal_weight = 0.1;
@@ -78,12 +92,20 @@ struct Options
   bool optimize_trajectory = true;
   std::map<std::string, std::pair<double, double>> tightened_limits;
   std::map<std::string, double> nominal_positions;
+  std::string base_joint_name = "world_joint";
+  std::string base_frame = "cirtesub/base_link";
+  std::vector<double> base_velocity_limits{0.2, 0.2, 0.2, 0.3, 0.3, 0.3};
+  std::vector<double> base_acceleration_limits{0.2, 0.2, 0.2, 0.3, 0.3, 0.3};
+  std::vector<double> base_weights{10.0, 10.0, 10.0, 20.0, 20.0, 10.0};
 };
 
 struct PlannedTrajectory
 {
   robot_trajectory::RobotTrajectoryPtr trajectory;
   trajectory_msgs::msg::JointTrajectory joint_trajectory;
+  trajectory_msgs::msg::MultiDOFJointTrajectory base_trajectory;
+  Eigen::Isometry3d base_reference_pose = Eigen::Isometry3d::Identity();
+  std::vector<bool> available_dofs;
   // One nominal-path parameter per final (possibly refined) trajectory waypoint.
   std::vector<double> progress_values;
   std::string reference_frame;

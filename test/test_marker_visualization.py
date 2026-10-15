@@ -68,6 +68,19 @@ class MarkerVisualizationTest(unittest.TestCase):
             apply_snapshot(display, module.replacement_snapshot(source))
             self.assertEqual(set(display), {(marker.ns, marker.id) for marker in source.markers})
 
+    def test_pose_snapshot_replaces_joint_paths_on_the_common_output(self):
+        node = MagicMock()
+        display = {}
+        pose = plan("cartesian", [("desired_path", 1), ("target", 3)])
+        for source in (self.cartesian, pose, self.bimanual, pose):
+            module.ManipulationMarkerVisualization._on_plan(node, source)
+            snapshot = node._publisher.publish.call_args.args[0]
+            apply_snapshot(display, snapshot)
+            self.assertEqual(set(display), {(marker.ns, marker.id) for marker in source.markers})
+        self.assertEqual(node._publisher.publish.call_count, 4)
+        self.assertEqual(len(display), 4)
+        node.get_logger.return_value.warning.assert_not_called()
+
     def test_last_message_alone_reconstructs_complete_display(self):
         node = MagicMock()
         module.ManipulationMarkerVisualization._on_plan(node, self.cartesian)

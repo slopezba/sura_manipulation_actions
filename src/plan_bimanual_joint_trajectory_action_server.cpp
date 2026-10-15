@@ -1,4 +1,5 @@
 #include "sura_manipulation_actions/plan_bimanual_joint_trajectory_action_server.hpp"
+#include "sura_manipulation_actions/floating_base_state.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -461,20 +462,20 @@ bool PlanBimanualJointTrajectoryActionServer::getCurrentState(
     return false;
   }
 
-  const auto start_time = now();
-  while (rclcpp::ok() && (now() - start_time).seconds() < current_state_timeout_) {
+  const auto start_time = std::chrono::steady_clock::now();
+  while (rclcpp::ok() && std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count() < current_state_timeout_) {
     {
       planning_scene_monitor::LockedPlanningSceneRO scene(planning_scene_monitor_);
       if (scene) {
         state = scene->getCurrentState();
         state.update();
-        return true;
+        if (refreshFloatingBase(planning_scene_monitor_, state, now(), current_state_timeout_, error_message)) {return true;}
       }
     }
     rclcpp::sleep_for(std::chrono::milliseconds(20));
   }
 
-  error_message = "Timed out waiting for current planning scene state";
+  if (error_message.empty()) {error_message = "Timed out waiting for current planning scene state";}
   return false;
 }
 

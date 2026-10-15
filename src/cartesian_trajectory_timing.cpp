@@ -1,4 +1,5 @@
 #include "sura_manipulation_actions/cartesian_trajectory_timing.hpp"
+#include "sura_manipulation_actions/base_trajectory_sampling.hpp"
 
 #include <moveit/trajectory_processing/iterative_time_parameterization.h>
 
@@ -36,71 +37,23 @@ Polynomial polynomial(
   const trajectory_msgs::msg::JointTrajectoryPoint & b,
   std::size_t joint, double span)
 {
-  Polynomial c{};
-  c[0] = a.positions[joint];
-  if (a.velocities.empty() || b.velocities.empty()) {
-    c[1] = b.positions[joint] - a.positions[joint];
-    return c;
-  }
-  c[1] = a.velocities[joint] * span;
-  if (a.accelerations.empty() || b.accelerations.empty()) {
-    const double d = b.positions[joint] - c[0] - c[1];
-    const double v = b.velocities[joint] * span - c[1];
-    c[2] = 3.0 * d - v;
-    c[3] = v - 2.0 * d;
-    return c;
-  }
-  c[2] = 0.5 * a.accelerations[joint] * span * span;
-  const double d = b.positions[joint] - c[0] - c[1] - c[2];
-  const double v = b.velocities[joint] * span - c[1] - 2.0 * c[2];
-  const double acc = b.accelerations[joint] * span * span - 2.0 * c[2];
-  c[3] = 10.0 * d - 4.0 * v + 0.5 * acc;
-  c[4] = -15.0 * d + 7.0 * v - acc;
-  c[5] = 6.0 * d - 3.0 * v + 0.5 * acc;
-  return c;
+  const bool has_velocity = !a.velocities.empty() && !b.velocities.empty();
+  const bool has_acceleration = !a.accelerations.empty() && !b.accelerations.empty();
+  return baseHermitePolynomial(a.positions[joint], b.positions[joint],
+    has_velocity ? a.velocities[joint] : 0.0, has_velocity ? b.velocities[joint] : 0.0,
+    has_acceleration ? a.accelerations[joint] : 0.0, has_acceleration ? b.accelerations[joint] : 0.0,
+    span, has_velocity, has_acceleration);
 }
 
 double evaluate(const Polynomial & c, double u, int derivative)
 {
-  double value = 0.0;
-  for (int i = 5; i >= derivative; --i) {
-    double coefficient = c[static_cast<std::size_t>(i)];
-    for (int j = 0; j < derivative; ++j) {
-      coefficient *= static_cast<double>(i - j);
-    }
-    value = value * u + coefficient;
-  }
-  return value;
+  return evaluateBasePolynomial(c, u, derivative);
 }
 
 // Extrema are checked analytically rather than inferred from temporal samples.
 std::vector<double> extrema(const Polynomial & c, int derivative)
 {
-  std::vector<double> coefficients;
-  for (int i = derivative; i <= 5; ++i) {
-    double value = c[static_cast<std::size_t>(i)];
-    for (int j = 0; j < derivative; ++j) {value *= static_cast<double>(i - j);}
-    coefficients.push_back(value);
-  }
-  while (coefficients.size() > 1 && std::abs(coefficients.back()) < 1.0e-13) {
-    coefficients.pop_back();
-  }
-  std::vector<double> points{0.0, 1.0};
-  const int degree = static_cast<int>(coefficients.size()) - 1;
-  if (degree <= 0) {return points;}
-  Eigen::MatrixXd companion = Eigen::MatrixXd::Zero(degree, degree);
-  for (int i = 1; i < degree; ++i) {companion(i, i - 1) = 1.0;}
-  for (int i = 0; i < degree; ++i) {
-    companion(i, degree - 1) = -coefficients[static_cast<std::size_t>(i)] / coefficients.back();
-  }
-  Eigen::EigenSolver<Eigen::MatrixXd> solver(companion, false);
-  if (solver.info() != Eigen::Success) {return {};}
-  for (const auto & root : solver.eigenvalues()) {
-    if (std::abs(root.imag()) < 1.0e-8 && root.real() > 0.0 && root.real() < 1.0) {
-      points.push_back(root.real());
-    }
-  }
-  return points;
+  return basePolynomialExtrema(c, derivative);
 }
 
 bool validMessage(const trajectory_msgs::msg::JointTrajectory & msg, std::string & error)

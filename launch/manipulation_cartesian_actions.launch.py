@@ -81,6 +81,16 @@ def _setup(context):
         name="plan_bimanual_cartesian_trajectory_lifecycle_action_server",
         namespace="", output="screen", parameters=parameters,
     )]
+    if argument("launch_planning_markers").lower() == "true":
+        arms = config["arm_names"][:2]
+        actions.append(Node(package="task_priority_kinematic_control_rqt", executable="planning_marker_server",
+            name="planning_marker_server", output="screen", parameters=[{
+                "robot_namespace": namespace,
+                "use_sim_time": argument("use_sim_time").lower() == "true",
+                "bimanual.reference_frame": config["relative_reference_frame"],
+                "bimanual.arm_names": arms,
+                "bimanual.tool_frames": [config[f"arms.{arm}.tip_frame"] for arm in arms],
+            }]))
     if argument("launch_marker_visualization").lower() == "true":
         actions.insert(0, Node(
             package="sura_manipulation_actions",
@@ -114,7 +124,7 @@ def generate_launch_description():
             "alpha_joint_states_topic:=/${robot_namespace}/stonefish/alpha/joint_states "
             "alpha_normalized_joint_states_topic:=/${robot_namespace}/alpha/joint_states"
         ),
-        "srdf_xacro_arguments": "robot_name:=${robot_namespace}",
+        "srdf_xacro_arguments": "robot_name:=${robot_namespace} floating_base:=true world_frame:=world_ned",
         "moveit_config_package": "cirtesub_description",
         "joint_limits_file": "moveit2/joint_limits.yaml",
         "kinematics_file": "moveit2/kinematics.yaml",
@@ -125,6 +135,7 @@ def generate_launch_description():
         "use_sim_time": "false",
         "use_rviz": "false",
         "launch_marker_visualization": "true",
+        "launch_planning_markers": "true",
         "rviz_config_file": os.path.join(share, "rviz", "bimanual_cartesian_planning.rviz"),
     }
     return LaunchDescription([

@@ -10,6 +10,7 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 find_package(control_msgs REQUIRED)
 find_package(controller_manager_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
@@ -22,6 +23,7 @@ find_package(nav_msgs REQUIRED)
 find_package(osqp_vendor REQUIRED)
 find_package(osqp REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
@@ -34,14 +36,31 @@ find_package(visualization_msgs REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/BaseMotionLimits.msg"
+  "msg/TrajectoryTrackingTolerances.msg"
+  "msg/PlanningTargetState.msg"
+  "srv/UpdatePlanningTarget.srv"
+  "action/FollowCartesianTrajectory.action"
   "action/PlanJointTrajectory.action"
   "action/PlanBimanualJointTrajectory.action"
   "action/PlanBimanualCartesianTrajectory.action"
   "action/PlanCartesianTrajectory.action"
-  DEPENDENCIES trajectory_msgs geometry_msgs nav_msgs
+  DEPENDENCIES builtin_interfaces trajectory_msgs geometry_msgs nav_msgs
 )
 
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
+
+# Consumers using ament_target_dependencies prefer exported targets over the
+# legacy include-directory variables when rosidl targets are present.
+add_library(trajectory_sampling INTERFACE)
+target_include_directories(trajectory_sampling INTERFACE
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(trajectory_sampling INTERFACE Eigen3::Eigen)
+ament_target_dependencies(trajectory_sampling INTERFACE geometry_msgs trajectory_msgs)
+install(TARGETS trajectory_sampling EXPORT export_trajectory_sampling)
+ament_export_targets(export_trajectory_sampling)
 
 add_library(trajectory_execution STATIC src/trajectory_execution.cpp)
 target_include_directories(trajectory_execution PUBLIC include)
@@ -70,11 +89,12 @@ target_link_libraries(plan_bimanual_cartesian_trajectory_action_server
   bimanual_cartesian_planning trajectory_execution "${cpp_typesupport_target}")
 
 add_executable(plan_cartesian_trajectory_action_server
-  src/plan_cartesian_trajectory_action_server.cpp)
+  src/plan_cartesian_trajectory_action_server.cpp
+  src/cartesian_pose_execution.cpp)
 target_include_directories(plan_cartesian_trajectory_action_server PRIVATE include)
 ament_target_dependencies(plan_cartesian_trajectory_action_server
   controller_manager_msgs control_msgs geometry_msgs moveit_core moveit_msgs moveit_ros_planning
-  nav_msgs rclcpp rclcpp_action rclcpp_lifecycle sensor_msgs std_srvs tf2 tf2_ros
+  nav_msgs rcl_interfaces rclcpp rclcpp_action rclcpp_lifecycle sensor_msgs std_srvs tf2 tf2_ros
   trajectory_msgs visualization_msgs)
 target_link_libraries(plan_cartesian_trajectory_action_server
   bimanual_cartesian_planning trajectory_execution "${cpp_typesupport_target}")
@@ -98,6 +118,8 @@ ament_target_dependencies(plan_joint_trajectory_action_server
   rclcpp_lifecycle
   sensor_msgs
   std_srvs
+  tf2
+  tf2_ros
   trajectory_msgs
   visualization_msgs
 )
@@ -140,6 +162,8 @@ ament_target_dependencies(plan_bimanual_joint_trajectory_action_server
   rclcpp
   rclcpp_action
   rclcpp_lifecycle
+  tf2
+  tf2_ros
   trajectory_msgs
   visualization_msgs
 )
@@ -198,7 +222,7 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_split_controller_switching
     ament_index_cpp control_msgs controller_manager_msgs moveit_core moveit_msgs
     moveit_ros_planning rclcpp rclcpp_action rclcpp_lifecycle sensor_msgs std_srvs
-    trajectory_msgs visualization_msgs)
+    tf2 tf2_ros trajectory_msgs visualization_msgs)
   target_link_libraries(test_split_controller_switching trajectory_execution "${cpp_typesupport_target}" yaml-cpp)
   ament_add_gtest(test_trajectory_execution test/test_trajectory_execution.cpp)
   target_include_directories(test_trajectory_execution PRIVATE include)
@@ -209,6 +233,14 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_bimanual_cartesian_planner
     geometry_msgs moveit_core moveit_msgs moveit_ros_planning shape_msgs srdfdom trajectory_msgs urdf)
   target_link_libraries(test_bimanual_cartesian_planner bimanual_cartesian_planning)
+  ament_add_gtest(test_base_trajectory_sampling test/test_base_trajectory_sampling.cpp)
+  target_include_directories(test_base_trajectory_sampling PRIVATE include)
+  ament_target_dependencies(test_base_trajectory_sampling geometry_msgs trajectory_msgs)
+  target_link_libraries(test_base_trajectory_sampling Eigen3::Eigen)
+  ament_add_gtest(test_cartesian_pose_path test/test_cartesian_pose_path.cpp)
+  target_include_directories(test_cartesian_pose_path PRIVATE include)
+  ament_target_dependencies(test_cartesian_pose_path geometry_msgs nav_msgs)
+  target_link_libraries(test_cartesian_pose_path Eigen3::Eigen)
   ament_add_gtest(test_bimanual_cartesian_action_server
     test/test_bimanual_cartesian_action_server.cpp
     src/plan_bimanual_cartesian_trajectory_action_server.cpp)
@@ -221,12 +253,13 @@ if(BUILD_TESTING)
   target_link_libraries(test_bimanual_cartesian_action_server
     bimanual_cartesian_planning trajectory_execution "${cpp_typesupport_target}")
   ament_add_gtest(test_cartesian_action_server
-    test/test_cartesian_action_server.cpp src/plan_cartesian_trajectory_action_server.cpp)
+    test/test_cartesian_action_server.cpp src/plan_cartesian_trajectory_action_server.cpp
+    src/cartesian_pose_execution.cpp)
   target_compile_definitions(test_cartesian_action_server PRIVATE SURA_MANIPULATION_ACTIONS_NO_MAIN)
   target_include_directories(test_cartesian_action_server PRIVATE include)
   ament_target_dependencies(test_cartesian_action_server
     controller_manager_msgs control_msgs geometry_msgs lifecycle_msgs moveit_core moveit_msgs
-    moveit_ros_planning nav_msgs rclcpp rclcpp_action rclcpp_lifecycle sensor_msgs std_srvs
+    moveit_ros_planning nav_msgs rcl_interfaces rclcpp rclcpp_action rclcpp_lifecycle sensor_msgs std_srvs
     tf2 tf2_ros trajectory_msgs visualization_msgs)
   target_link_libraries(test_cartesian_action_server
     bimanual_cartesian_planning trajectory_execution "${cpp_typesupport_target}")
@@ -236,5 +269,6 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
 endif()
 
-ament_export_dependencies(rosidl_default_runtime geometry_msgs nav_msgs trajectory_msgs)
+ament_export_include_directories(include)
+ament_export_dependencies(rosidl_default_runtime builtin_interfaces Eigen3 geometry_msgs nav_msgs trajectory_msgs)
 ament_package()

@@ -1,17 +1,21 @@
 /**:
   ros__parameters:
     robot_namespace: cirtesub
+    planning_frame: world_ned
+    base_frame: ${robot_namespace}/base_link
     execution_backend: controller
     joint_states_topic: /${robot_namespace}/alpha/joint_states
     arm_names:
     - alpha_left
     - alpha_right
     arms.alpha_left.group: alpha_left
+    arms.alpha_left.whole_body_group: base_alpha_left
     arms.alpha_left.tip_frame: ${robot_namespace}/alpha_left/standard_jaws_tool
     arms.alpha_left.controller_action: /${robot_namespace}/alpha/controller/alpha_left_joint_trajectory_controller/follow_joint_trajectory
     arms.alpha_left.controller_name: alpha_left_joint_trajectory_controller
     arms.alpha_left.manager_service: /${robot_namespace}/alpha/controller/controller_manager/list_controllers
     arms.alpha_right.group: alpha_right
+    arms.alpha_right.whole_body_group: base_alpha_right
     arms.alpha_right.tip_frame: ${robot_namespace}/alpha_right/standard_jaws_tool
     arms.alpha_right.controller_action: /${robot_namespace}/alpha/controller/alpha_right_joint_trajectory_controller/follow_joint_trajectory
     arms.alpha_right.controller_name: alpha_right_joint_trajectory_controller
@@ -19,7 +23,7 @@
     current_state_timeout: 2.0
     current_state_max_age: 2.0
     planning.default_planning_time: 5.0
-    planning.cartesian_step: 0.005
+    planning.cartesian_step: 0.02
     planning.angular_step: 0.05
     planning.max_iterations: 100
     planning.max_waypoints: 2000
@@ -32,8 +36,16 @@
     planning.smoothness_weight: 0.5
     planning.optimize_trajectory: true
     planning.smoothing_passes: 2
-    planning.velocity_scaling: 0.1
-    planning.acceleration_scaling: 0.1
+    planning.velocity_scaling: 0.8
+    planning.acceleration_scaling: 0.4
+    # Pose mode limits apply to the Cartesian reference, before goal scaling.
+    pose.max_linear_velocity: 1.0
+    pose.max_angular_velocity: 0.5
+    pose.max_linear_acceleration: 0.4
+    pose.max_angular_acceleration: 0.2
+    planning.base_joint_name: world_joint
+    planning.base_velocity_limits: [1.0, 1.0, 1.0, 0.5, 0.5, 0.5]
+    planning.base_acceleration_limits: [0.4, 0.4, 0.4, 0.2, 0.2, 0.2]
     planning.validation_joint_step: 0.01
     planning.validation_prismatic_step: 0.001
     planning.validation_time_step: 0.01
@@ -78,10 +90,27 @@
     execution.start_prismatic_tolerance: 0.0001
     execution.base_position_tolerance: 0.05
     execution.base_orientation_tolerance: 0.1
-    reference_frame: ${robot_namespace}/base_link
+    reference_frame: world_ned
+    execution.coordinated_action: /${robot_namespace}/controller/task_priority/follow_cartesian_trajectory
+    execution.base_manager_service: /${robot_namespace}/controller/controller_manager/list_controllers
+    execution.base_controller_name: body_velocity
+    execution.base_path_tolerance: [0.05, 0.05, 0.05, 0.3, 0.3, 0.3]
+    execution.base_goal_tolerance: [0.05, 0.05, 0.05, 0.3, 0.3, 0.3]
+    execution.tip_path_tolerance: [0.02, 0.02, 0.02, 0.3, 0.3, 0.3]
+    execution.tip_goal_tolerance: [0.02, 0.02, 0.02, 0.3, 0.3, 0.3]
+    execution.goal_time_tolerance: 0.5
     arms.alpha_left.task_action: /${robot_namespace}/controller/task_priority/tasks/left_joint_trajectory/follow_joint_trajectory
     arms.alpha_left.task_controller_name: task_priority_controller
     arms.alpha_left.task_manager_service: /${robot_namespace}/alpha/controller/controller_manager/list_controllers
+    arms.alpha_left.pose_task: left_pose
+    arms.alpha_left.pose_controller_node: /${robot_namespace}/alpha/controller/task_priority_controller
+    # The bringup remaps pose topics to the public controller namespace.
+    arms.alpha_left.pose_target_topic: /${robot_namespace}/controller/task_priority/tasks/left_pose/target
+    arms.alpha_left.pose_feedforward_topic: /${robot_namespace}/controller/task_priority/tasks/left_pose/feedforward
     arms.alpha_right.task_action: /${robot_namespace}/controller/task_priority/tasks/right_joint_trajectory/follow_joint_trajectory
     arms.alpha_right.task_controller_name: task_priority_controller
     arms.alpha_right.task_manager_service: /${robot_namespace}/alpha/controller/controller_manager/list_controllers
+    arms.alpha_right.pose_task: right_pose
+    arms.alpha_right.pose_controller_node: /${robot_namespace}/alpha/controller/task_priority_controller
+    arms.alpha_right.pose_target_topic: /${robot_namespace}/controller/task_priority/tasks/right_pose/target
+    arms.alpha_right.pose_feedforward_topic: /${robot_namespace}/controller/task_priority/tasks/right_pose/feedforward

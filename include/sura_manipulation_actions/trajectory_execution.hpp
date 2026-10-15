@@ -32,6 +32,10 @@ struct ExecutionOptions
   double feedback_rate{10.0};
   // Controllers share a future timestamp; tasks can use stamp zero instead.
   bool use_common_start_stamp{true};
+  // Called after endpoint discovery, before dispatch; supervision uses this epoch.
+  std::function<void(const builtin_interfaces::msg::Time &)> on_start;
+  std::vector<control_msgs::msg::JointTolerance> path_tolerance, goal_tolerance;
+  builtin_interfaces::msg::Duration goal_time_tolerance{};
 };
 
 struct ExecutionResult

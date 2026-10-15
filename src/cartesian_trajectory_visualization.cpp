@@ -87,6 +87,11 @@ CartesianTrajectoryVisualization::CartesianTrajectoryVisualization(
   const auto qos = rclcpp::QoS(1).reliable().transient_local();
   joint_pub_ = node_->create_publisher<trajectory_msgs::msg::JointTrajectory>(
     topic_prefix + "/joint_trajectory", qos);
+  if (single_arm) {
+    base_trajectory_pub_ = node_->create_publisher<trajectory_msgs::msg::MultiDOFJointTrajectory>(
+      topic_prefix + "/base_trajectory", qos);
+    base_path_pub_ = node_->create_publisher<nav_msgs::msg::Path>(topic_prefix + "/base_path", qos);
+  }
   if (!single_arm) {
     arm_a_pub_ = node_->create_publisher<nav_msgs::msg::Path>(topic_prefix + "/arm_a_path", qos);
     relative_pub_ = node_->create_publisher<nav_msgs::msg::Path>(topic_prefix + "/relative_path", qos);
@@ -104,13 +109,14 @@ CartesianTrajectoryVisualization::CartesianTrajectoryVisualization(
     // Capture shared state/publishers, never the visualization object's lifetime.
     path_refresh_timer_ = node_->create_wall_timer(std::chrono::milliseconds(100),
       [cache = path_cache_, arm_a_pub = arm_a_pub_, arm_b_pub = arm_b_pub_,
-      relative_pub = relative_pub_, desired_pub = desired_pub_]() {
+      relative_pub = relative_pub_, desired_pub = desired_pub_, base_pub = base_path_pub_]() {
         std::lock_guard<std::mutex> lock(cache->mutex);
         if (!cache->ready) {return;}
         if (arm_a_pub) {arm_a_pub->publish(cache->views.arm_a_path);}
         arm_b_pub->publish(cache->views.arm_b_path);
         if (relative_pub) {relative_pub->publish(cache->views.relative_path);}
         desired_pub->publish(cache->views.desired_relative_path);
+        if (base_pub) {base_pub->publish(cache->views.base_path);}
       });
   }
 }
@@ -218,6 +224,17 @@ CartesianViews CartesianTrajectoryVisualization::publishSingleArm(
   views.arm_b_path.header.frame_id = plan.reference_frame;
   views.arm_b_path.header.stamp = rclcpp::Time(0, 0, node_->get_clock()->get_clock_type());
   views.desired_relative_path.header = views.arm_b_path.header;
+  views.base_path.header = views.arm_b_path.header;
+  for (const auto & point : plan.base_trajectory.points) {
+    if (point.transforms.empty()) {continue;}
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header = views.base_path.header;
+    pose.pose.position.x = point.transforms.front().translation.x;
+    pose.pose.position.y = point.transforms.front().translation.y;
+    pose.pose.position.z = point.transforms.front().translation.z;
+    pose.pose.orientation = point.transforms.front().rotation;
+    views.base_path.poses.push_back(pose);
+  }
   const Eigen::Isometry3d reference_from_model = plan.model_from_reference.inverse();
   for (std::size_t i = 0; i < plan.trajectory->getWayPointCount(); ++i) {
     geometry_msgs::msg::PoseStamped pose;
@@ -232,6 +249,7 @@ CartesianViews CartesianTrajectoryVisualization::publishSingleArm(
   auto joints = plan.joint_trajectory;
   joints.header.stamp = node_->now();
   joint_pub_->publish(joints);
+  if (base_trajectory_pub_) {base_trajectory_pub_->publish(plan.base_trajectory);}
   visualization_msgs::msg::MarkerArray markers;
   if (publish_paths_) {
     std::lock_guard<std::mutex> lock(path_cache_->mutex);
@@ -239,6 +257,9 @@ CartesianViews CartesianTrajectoryVisualization::publishSingleArm(
     path_cache_->ready = true;
     arm_b_pub_->publish(views.arm_b_path);
     desired_pub_->publish(views.desired_relative_path);
+    if (base_path_pub_) {base_path_pub_->publish(views.base_path);}
+    markers.markers.push_back(pathMarker(views.base_path,
+      marker_namespace_ + "/base_path", 0.2F, 0.6F, 1.0F));
     markers.markers.push_back(pathMarker(views.arm_b_path,
       marker_namespace_ + "/planned_path", 0.0F, 1.0F, 0.5F));
     markers.markers.push_back(pathMarker(views.desired_relative_path,
@@ -251,6 +272,58 @@ CartesianViews CartesianTrajectoryVisualization::publishSingleArm(
       reference_from_model * plan.trajectory->getLastWayPoint().getGlobalLinkTransform(arm.tip_frame), 0.04);
   }
   if (!markers.markers.empty()) {marker_pub_->publish(markers);}
+  return views;
+}
+
+CartesianViews CartesianTrajectoryVisualization::publishPosePath(const nav_msgs::msg::Path & desired)
+{
+  CartesianViews views;
+  views.desired_relative_path = desired;
+  views.desired_relative_path.header.stamp = rclcpp::Time(0, 0, node_->get_clock()->get_clock_type());
+  for (auto & pose : views.desired_relative_path.poses) {
+    pose.header = views.desired_relative_path.header;
+  }
+  views.arm_a_path.header = views.desired_relative_path.header;
+  views.arm_b_path.header = views.desired_relative_path.header;
+  views.relative_path.header = views.desired_relative_path.header;
+  views.base_path.header = views.desired_relative_path.header;
+
+  // Empty messages also replace latched trajectories from a previous joint plan.
+  trajectory_msgs::msg::JointTrajectory joints;
+  joints.header = views.desired_relative_path.header;
+  joint_pub_->publish(joints);
+  if (base_trajectory_pub_) {
+    trajectory_msgs::msg::MultiDOFJointTrajectory base;
+    base.header = views.desired_relative_path.header;
+    base_trajectory_pub_->publish(base);
+  }
+  visualization_msgs::msg::MarkerArray markers;
+  // Send a complete ADD-only snapshot, like the joint planning backends.
+  // The shared visualization node clears older layers and publishes the
+  // replacement on manipulation/markers, including when switching to Pose.
+  if (publish_paths_) {
+    std::lock_guard<std::mutex> lock(path_cache_->mutex);
+    path_cache_->views = views;
+    path_cache_->ready = true;
+    if (arm_a_pub_) {arm_a_pub_->publish(views.arm_a_path);}
+    arm_b_pub_->publish(views.arm_b_path);
+    if (relative_pub_) {relative_pub_->publish(views.relative_path);}
+    desired_pub_->publish(views.desired_relative_path);
+    if (base_path_pub_) {base_path_pub_->publish(views.base_path);}
+    markers.markers.push_back(pathMarker(views.desired_relative_path,
+      marker_namespace_ + "/desired_path", 0.7F, 0.3F, 1.0F, true));
+  }
+  if (publish_markers_ && !desired.poses.empty()) {
+    const auto & message = desired.poses.back().pose;
+    Eigen::Isometry3d target = Eigen::Isometry3d::Identity();
+    target.translation() = Eigen::Vector3d(
+      message.position.x, message.position.y, message.position.z);
+    const auto & q = message.orientation;
+    target.linear() = Eigen::Quaterniond(q.w, q.x, q.y, q.z).normalized().toRotationMatrix();
+    appendPoseAxes(markers, views.desired_relative_path.header,
+      marker_namespace_ + "/target", target, 0.06);
+  }
+  marker_pub_->publish(markers);
   return views;
 }
 

@@ -197,6 +197,7 @@ def _launch_setup(context, *args, **kwargs):
                     " ",
                     "robot_name:=",
                     robot_namespace,
+                    " floating_base:=true world_frame:=world_ned",
                 ]
             ),
             value_type=str,

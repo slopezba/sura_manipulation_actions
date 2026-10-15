@@ -1,6 +1,7 @@
 #include "sura_manipulation_actions/bimanual_cartesian_planner.hpp"
 #include "sura_manipulation_actions/cartesian_trajectory_timing.hpp"
 #include "sura_manipulation_actions/single_arm_cartesian_planner.hpp"
+#include "sura_manipulation_actions/base_trajectory_sampling.hpp"
 
 #include <gtest/gtest.h>
 #include <moveit/robot_model/joint_model_group.h>
@@ -32,7 +33,8 @@ struct SyntheticRobot
   std::string spare_joint = "spare_slide";
 
   explicit SyntheticRobot(
-    int left_dofs = 4, int right_dofs = 6, double left_yaw = 0.0, double right_yaw = 0.0)
+    int left_dofs = 4, int right_dofs = 6, double left_yaw = 0.0, double right_yaw = 0.0,
+    bool floating = false)
   {
     std::ostringstream urdf;
     urdf << "<robot name='synthetic'><link name='world'/>"
@@ -79,13 +81,22 @@ struct SyntheticRobot
     const auto urdf_model = urdf::parseURDF(urdf.str());
     if (!urdf_model) {throw std::runtime_error("Synthetic URDF could not be parsed");}
     auto semantic = std::make_shared<srdf::Model>();
-    const std::string srdf =
+    std::string srdf =
       "<robot name='synthetic'><group name='left'><chain base_link='left_mount' tip_link='left_tip'/></group>"
       "<group name='right'><chain base_link='right_mount' tip_link='right_tip'/></group>"
-      "<group name='both'><group name='left'/><group name='right'/></group></robot>";
+      "<group name='both'><group name='left'/><group name='right'/></group>";
+    if (floating) {
+      srdf += "<virtual_joint name='world_joint' type='floating' parent_frame='world_ned' child_link='world'/>"
+        "<group name='base_left'><joint name='world_joint'/><group name='left'/></group>"
+        "<group name='base_right'><joint name='world_joint'/><group name='right'/></group>";
+      left.whole_body_group_name = "base_left";
+      right.whole_body_group_name = "base_right";
+    }
+    srdf += "</robot>";
     if (!semantic->initString(*urdf_model, srdf)) {throw std::runtime_error("Synthetic SRDF could not be parsed");}
     model = std::make_shared<moveit::core::RobotModel>(urdf_model, semantic);
     for (auto * joint : model->getActiveJointModels()) {
+      if (joint->getVariableCount() != 1) {continue;}
       const auto & name = joint->getVariableNames().front();
       auto bounds = joint->getVariableBounds(name);
       bounds.velocity_bounded_ = true;
@@ -100,6 +111,9 @@ struct SyntheticRobot
     scene->getCurrentStateNonConst().setToDefaultValues();
     for (const auto & name : model->getVariableNames()) {
       scene->getCurrentStateNonConst().setVariablePosition(name, 0.0);
+    }
+    if (floating) {
+      scene->getCurrentStateNonConst().setJointPositions("world_joint", Eigen::Isometry3d::Identity());
     }
     scene->getCurrentStateNonConst().update();
     pair.arm_names = {left.name, right.name};
@@ -799,6 +813,95 @@ TEST(BimanualCartesianPlanner, RevalidationUsesLiveNonCommandedRobotJoints)
   EXPECT_NE(error.find("planning scene"), std::string::npos);
 }
 
+TEST(BimanualCartesianPlanner, RevalidationAllowsBaseDriftWithAnAttachedReference)
+{
+  SyntheticRobot robot(4, 6, 0.6, -0.8, true);
+  BimanualCartesianPlanner planner;
+  const auto & start = robot.scene->getCurrentState();
+  auto goal = robot.goal(0.0);
+  goal.reference_frame = "reference";
+  goal.relative_target = BimanualCartesianPlanner::relativePoseInReference(
+    start.getGlobalLinkTransform(robot.left.tip_frame),
+    start.getGlobalLinkTransform(robot.right.tip_frame), start.getGlobalLinkTransform("reference"));
+  goal.relative_target.translation().x() += 0.02;
+  goal.relative_position_tolerance.setConstant(0.0001);
+  PlannedTrajectory plan;
+  std::string error;
+  const auto options = robot.options();
+  ASSERT_TRUE(planner.plan(robot.scene, start, robot.left, robot.right, robot.pair,
+    goal, options, plan, error)) << error;
+
+  Eigen::Isometry3d drift = Eigen::Isometry3d::Identity();
+  drift.translation() = Eigen::Vector3d(0.001, -0.002, 0.0005);
+  drift.linear() = Eigen::AngleAxisd(0.002, Eigen::Vector3d::UnitY()).toRotationMatrix();
+  robot.scene->getCurrentStateNonConst().setJointPositions("world_joint", drift);
+  robot.scene->getCurrentStateNonConst().update();
+  EXPECT_GT((robot.scene->getCurrentState().getGlobalLinkTransform("reference").matrix() -
+    plan.model_from_reference.matrix()).norm(), 1.0e-8);
+  ASSERT_TRUE(planner.validatePlan(robot.scene, robot.left, robot.right, robot.pair,
+    goal, options, plan, error)) << error;
+
+  // Accepting live drift must not accept modified snapshot metadata or goals.
+  for (int field = 0; field < 4; ++field) {
+    auto changed = plan;
+    auto changed_goal = goal;
+    if (field == 0) {changed.model_from_reference.translation().x() += 0.01;}
+    if (field == 1) {changed.initial_arm_a_pose.translation().x() += 0.01;}
+    if (field == 2) {changed.initial_relative_pose.translation().x() += 0.01;}
+    if (field == 3) {changed_goal.relative_target.translation().x() += 0.01;}
+    EXPECT_FALSE(planner.validatePlan(robot.scene, robot.left, robot.right, robot.pair,
+      changed_goal, options, changed, error));
+    EXPECT_NE(error.find("pose references"), std::string::npos);
+  }
+}
+
+TEST(BimanualCartesianPlanner, RevalidationKeepsOriginalNominalPathInFixedReference)
+{
+  SyntheticRobot robot(4, 6, 0.0, 0.0, true);
+  BimanualCartesianPlanner planner;
+  auto goal = robot.goal(-0.02);
+  goal.relative_position_tolerance = Eigen::Vector3d(0.0001, 0.00118, 0.0001);
+  PlannedTrajectory plan;
+  std::string error;
+  const auto options = robot.options();
+  ASSERT_TRUE(planner.plan(robot.scene, robot.scene->getCurrentState(), robot.left,
+    robot.right, robot.pair, goal, options, plan, error)) << error;
+  Eigen::Isometry3d drift = Eigen::Isometry3d::Identity();
+  drift.linear() = Eigen::AngleAxisd(0.002, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  robot.scene->getCurrentStateNonConst().setJointPositions("world_joint", drift);
+  robot.scene->getCurrentStateNonConst().update();
+  // The initial separation now exceeds the original path's Y tolerance even
+  // though the shorter final separation remains within the goal's tolerance.
+  EXPECT_GT(0.6 * std::sin(0.002), goal.relative_position_tolerance.y());
+  EXPECT_LT(0.58 * std::sin(0.002), goal.relative_position_tolerance.y());
+  EXPECT_FALSE(planner.validatePlan(robot.scene, robot.left, robot.right, robot.pair,
+    goal, options, plan, error));
+  EXPECT_NE(error.find("Cartesian tolerances"), std::string::npos);
+}
+
+TEST(BimanualCartesianPlanner, RevalidationChecksCollisionsAtLiveFloatingBasePose)
+{
+  SyntheticRobot robot(4, 6, 0.0, 0.0, true);
+  BimanualCartesianPlanner planner;
+  auto goal = robot.goal(0.02);
+  goal.reference_frame = "world";
+  PlannedTrajectory plan;
+  std::string error;
+  const auto options = robot.options();
+  ASSERT_TRUE(planner.plan(robot.scene, robot.scene->getCurrentState(), robot.left,
+    robot.right, robot.pair, goal, options, plan, error)) << error;
+  Eigen::Isometry3d drift = Eigen::Isometry3d::Identity();
+  drift.translation().x() = 0.02;
+  robot.scene->getCurrentStateNonConst().setJointPositions("world_joint", drift);
+  robot.scene->getCurrentStateNonConst().update();
+  robot.obstacle(0.32);
+  EXPECT_FALSE(robot.scene->isStateColliding(plan.trajectory->getFirstWayPoint()));
+  EXPECT_TRUE(robot.scene->isStateColliding(robot.scene->getCurrentState()));
+  EXPECT_FALSE(planner.validatePlan(robot.scene, robot.left, robot.right, robot.pair,
+    goal, options, plan, error));
+  EXPECT_NE(error.find("planning scene"), std::string::npos);
+}
+
 TEST(BimanualCartesianPlanner, RevalidationChecksQuinticAccelerationBetweenPoints)
 {
   SyntheticRobot robot;
@@ -820,6 +923,91 @@ TEST(BimanualCartesianPlanner, RevalidationChecksQuinticAccelerationBetweenPoint
   EXPECT_FALSE(planner.validatePlan(robot.scene, robot.left, robot.right, robot.pair,
     goal, options, plan, error));
   EXPECT_NE(error.find("bounds"), std::string::npos);
+}
+
+TEST(SingleArmCartesianPlanner, FloatingBaseOnlyMotionRespectsLockedAxesAndAllArmJoints)
+{
+  SyntheticRobot robot(4, 4, 0.0, 0.0, true);
+  GoalSpec goal;
+  goal.reference_frame = "world_ned";
+  goal.relative_target = robot.scene->getCurrentState().getGlobalLinkTransform(robot.right.tip_frame);
+  goal.relative_target.translation().x() += 0.03;
+  goal.relative_position_tolerance.setConstant(0.00001);
+  goal.relative_orientation_tolerance.setConstant(0.00001);
+  goal.available_dofs.assign(10, false);
+  goal.available_dofs[0] = true;
+  goal.base_lower_limits = {-0.1, -0.1, -0.1, -0.1, -0.1, -0.1};
+  goal.base_upper_limits = {0.1, 0.1, 0.1, 0.1, 0.1, 0.1};
+  auto options = robot.options();
+  options.base_frame = "world";
+  PlannedTrajectory plan;
+  std::string error;
+  SingleArmCartesianPlanner planner;
+  ASSERT_TRUE(planner.plan(robot.scene, robot.scene->getCurrentState(), robot.right,
+    goal, options, plan, error)) << error;
+  ASSERT_EQ(plan.base_trajectory.points.size(), plan.joint_trajectory.points.size());
+  ASSERT_TRUE(planner.validatePlan(robot.scene, robot.right, goal, options, plan, error)) << error;
+  const double total = timing::seconds(plan.base_trajectory.points.back().time_from_start);
+  for (int i = 0; i <= 80; ++i) {
+    const double time = total * i / 80;
+    BaseTrajectorySample sample;
+    ASSERT_TRUE(sampleBaseTrajectory(plan.base_trajectory, time, sample, error)) << error;
+    EXPECT_LE(std::abs(sample.coordinates(0)), 0.100001);
+    EXPECT_LE(sample.velocity.cwiseAbs().maxCoeff(), 0.150001);
+    EXPECT_LE(sample.acceleration.cwiseAbs().maxCoeff(), 0.150001);
+    for (Eigen::Index axis = 1; axis < 6; ++axis) {EXPECT_NEAR(sample.coordinates(axis), 0.0, 1.0e-9);}
+    trajectory_msgs::msg::JointTrajectoryPoint arm;
+    ASSERT_TRUE(BimanualCartesianPlanner::sampleTrajectory(plan.joint_trajectory, time, arm, error));
+    for (const double value : arm.positions) {EXPECT_NEAR(value, 0.0, 1.0e-9);}
+  }
+  const auto final = baseCoordinates(plan.trajectory->getLastWayPoint().getGlobalLinkTransform("world"));
+  EXPECT_NEAR(final(0), 0.03, 0.000011);
+}
+
+TEST(SingleArmCartesianPlanner, EmptyMaskProducesStationaryBaseAndMovableArm)
+{
+  SyntheticRobot robot(4, 4, 0.0, 0.0, true);
+  GoalSpec goal;
+  goal.reference_frame = "world_ned";
+  goal.relative_target = robot.scene->getCurrentState().getGlobalLinkTransform(robot.left.tip_frame);
+  goal.relative_target.translation().x() += 0.02;
+  goal.relative_position_tolerance.setConstant(0.00001);
+  goal.relative_orientation_tolerance.setConstant(0.00001);
+  auto options = robot.options();
+  options.base_frame = "world";
+  PlannedTrajectory plan;
+  std::string error;
+  ASSERT_TRUE(SingleArmCartesianPlanner().plan(robot.scene, robot.scene->getCurrentState(),
+    robot.left, goal, options, plan, error)) << error;
+  for (const auto & point : plan.base_trajectory.points) {
+    EXPECT_DOUBLE_EQ(point.transforms.front().translation.x, 0.0);
+    EXPECT_DOUBLE_EQ(point.transforms.front().translation.y, 0.0);
+    EXPECT_DOUBLE_EQ(point.transforms.front().translation.z, 0.0);
+  }
+  EXPECT_GT(plan.joint_trajectory.points.back().positions.front(), 0.01998);
+}
+
+TEST(SingleArmCartesianPlanner, RejectsInvalidMaskAndBaseLimitViolation)
+{
+  SyntheticRobot robot(4, 4, 0.0, 0.0, true);
+  GoalSpec goal;
+  goal.reference_frame = "world_ned";
+  goal.relative_target = robot.scene->getCurrentState().getGlobalLinkTransform(robot.right.tip_frame);
+  goal.relative_target.translation().x() += 0.03;
+  goal.available_dofs.assign(9, true);
+  auto options = robot.options();
+  options.base_frame = "world";
+  PlannedTrajectory plan;
+  std::string error;
+  SingleArmCartesianPlanner planner;
+  EXPECT_FALSE(planner.plan(robot.scene, robot.scene->getCurrentState(), robot.right,
+    goal, options, plan, error));
+  EXPECT_NE(error.find("available_dofs"), std::string::npos);
+  goal.available_dofs.assign(10, false);
+  goal.available_dofs[0] = true;
+  goal.base_upper_limits = {0.01, 1.0, 1.0, 1.0, 1.0, 1.0};
+  EXPECT_FALSE(planner.plan(robot.scene, robot.scene->getCurrentState(), robot.right,
+    goal, options, plan, error));
 }
 
 }  // namespace

@@ -1,14 +1,22 @@
-# Absolute pose of the configured arm tip in the configured reference/base frame.
+# Absolute pose of the configured arm tip in any available TF frame.
+# Empty frame selects the configured planning frame (world_ned by default).
 string arm
 geometry_msgs/PoseStamped target_pose
 geometry_msgs/Vector3 position_tolerance
 geometry_msgs/Vector3 orientation_tolerance
+# [world x,y,z, base roll,pitch,yaw, configured arm joints]. False locks the
+# coordinate to its initial value. Empty means base locked, all arm joints free.
+bool[] available_dofs
+BaseMotionLimits base_limits
+TrajectoryTrackingTolerances tracking_tolerances
 # Non-positive step/time use server defaults; zero scaling uses server defaults.
 float64 cartesian_step
 float64 planning_time
 float64 velocity_scaling
 float64 acceleration_scaling
-# Empty uses the server default; otherwise "controller" or "task".
+# Empty uses the server default; otherwise "controller", "task" or "pose".
+# "pose" streams Cartesian tool references into the configured pose task.
+# Mobility/base limits and base/joint tracking tolerances are unused in pose mode.
 string execution_backend
 # false publishes a plan and waits for execute_pending_trajectory.
 bool execute
@@ -16,9 +24,15 @@ bool execute
 bool success
 string message
 trajectory_msgs/JointTrajectory joint_trajectory
+trajectory_msgs/MultiDOFJointTrajectory base_trajectory
+nav_msgs/Path base_path
 nav_msgs/Path path
+# In pose mode only desired_path is populated: geometry is not IK/collision validated.
 nav_msgs/Path desired_path
 ---
 float32 progress
 string current_stage
 string message
+float64[6] base_error
+float64[] joint_error
+float64[6] tip_error

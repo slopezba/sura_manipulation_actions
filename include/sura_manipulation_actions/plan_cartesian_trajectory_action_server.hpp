@@ -8,14 +8,17 @@
 #include <thread>
 
 #include "controller_manager_msgs/srv/list_controllers.hpp"
+#include "geometry_msgs/msg/twist_stamped.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
 #include "rclcpp_lifecycle/lifecycle_node.hpp"
 #include "std_srvs/srv/trigger.hpp"
 #include "sura_manipulation_actions/action/plan_cartesian_trajectory.hpp"
+#include "sura_manipulation_actions/action/follow_cartesian_trajectory.hpp"
 #include "sura_manipulation_actions/single_arm_cartesian_planner.hpp"
 #include "sura_manipulation_actions/cartesian_moveit_context.hpp"
 #include "sura_manipulation_actions/cartesian_trajectory_visualization.hpp"
 #include "sura_manipulation_actions/trajectory_execution.hpp"
+#include "sura_manipulation_actions/cartesian_pose_path.hpp"
 
 namespace sura_manipulation_actions
 {
@@ -25,6 +28,8 @@ class PlanCartesianTrajectoryActionServer : public rclcpp_lifecycle::LifecycleNo
 public:
   using Action = sura_manipulation_actions::action::PlanCartesianTrajectory;
   using Handle = rclcpp_action::ServerGoalHandle<Action>;
+  using FollowAction = sura_manipulation_actions::action::FollowCartesianTrajectory;
+  using FollowHandle = rclcpp_action::ClientGoalHandle<FollowAction>;
   using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
   explicit PlanCartesianTrajectoryActionServer(
     const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
@@ -36,6 +41,12 @@ private:
   {
     std::string action, controller_name, manager_service;
   };
+  struct PoseEndpoint
+  {
+    std::string controller_node, task_id, target_topic, feedforward_topic;
+    rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target;
+    rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr feedforward;
+  };
   struct PendingPlan
   {
     std::shared_ptr<Handle> handle;
@@ -45,7 +56,12 @@ private:
     bimanual_cartesian::Options options;
     bimanual_cartesian::PlannedTrajectory plan;
     CartesianViews views;
+    CartesianPosePath pose_path;
+    Eigen::Isometry3d pose_start = Eigen::Isometry3d::Identity();
     Eigen::Isometry3d fixed_from_model = Eigen::Isometry3d::Identity();
+    Eigen::Isometry3d base_reference = Eigen::Isometry3d::Identity();
+    sura_manipulation_actions::msg::BaseMotionLimits base_limits;
+    sura_manipulation_actions::msg::TrajectoryTrackingTolerances tracking_tolerances;
     std::atomic_bool finished{false};
   };
 
@@ -62,6 +78,15 @@ private:
   void handleAccepted(const std::shared_ptr<Handle> & handle);
   void planGoal(const std::shared_ptr<PendingPlan> & pending);
   void executePlan(const std::shared_ptr<PendingPlan> & pending);
+  void planPoseGoal(const std::shared_ptr<PendingPlan> & pending);
+  void executePosePlan(const std::shared_ptr<PendingPlan> & pending);
+  bool poseBackendReady(const PendingPlan & pending, bool & auto_update, std::string & error);
+  bool validatePosePending(const PendingPlan & pending, std::string & error) const;
+  bool readTipPose(const PendingPlan & pending, Eigen::Isometry3d & pose, std::string & error) const;
+  void executeCoordinated(const std::shared_ptr<PendingPlan> & pending);
+  void cancelCoordinated();
+  bool checkControllerTracking(
+    const PendingPlan & pending, double elapsed, bool final, std::string & error) const;
   bool backendReady(const PendingPlan & pending, std::string & error);
   bool validatePending(const PendingPlan & pending, std::string & error) const;
   void executeTrigger(
@@ -81,16 +106,31 @@ private:
 
   std::string robot_namespace_, moveit_namespace_, action_name_, fixed_frame_, execution_backend_;
   std::string reference_frame_;
-  double state_timeout_{2.0}, state_max_age_{2.0}, planning_time_{5.0}, cartesian_step_{0.005};
+  std::string base_frame_, coordinated_action_, base_manager_service_, base_controller_name_;
+  double state_timeout_{2.0}, state_max_age_{2.0}, planning_time_{5.0}, cartesian_step_{0.02};
   double start_joint_tolerance_{0.001}, start_prismatic_tolerance_{0.0001};
   double base_position_tolerance_{0.005}, base_orientation_tolerance_{0.01};
+  double pose_linear_velocity_{1.0}, pose_angular_velocity_{0.5};
+  double pose_linear_acceleration_{0.4}, pose_angular_acceleration_{0.2};
   bimanual_cartesian::Options planner_options_;
+  sura_manipulation_actions::msg::TrajectoryTrackingTolerances default_tracking_tolerances_;
   ExecutionOptions execution_options_;
   std::map<std::string, bimanual_cartesian::Arm> arms_;
   std::map<std::string, TaskEndpoint> tasks_;
+  std::map<std::string, PoseEndpoint> pose_endpoints_;
+  std::unique_ptr<tf2_ros::Buffer> pose_tf_buffer_;
+  std::unique_ptr<tf2_ros::TransformListener> pose_tf_listener_;
   std::unique_ptr<CartesianMoveItContext> context_;
   std::unique_ptr<CartesianTrajectoryVisualization> visualization_;
   std::unique_ptr<TrajectoryExecutor> executor_;
+  struct FollowDispatch
+  {
+    std::mutex mutex;
+    bool canceled{false};
+    FollowHandle::SharedPtr handle;
+  };
+  rclcpp_action::Client<FollowAction>::SharedPtr coordinated_client_;
+  std::shared_ptr<FollowDispatch> follow_dispatch_;
   rclcpp::Node::SharedPtr moveit_node_;
   rclcpp::CallbackGroup::SharedPtr clients_group_;
   rclcpp_action::Server<Action>::SharedPtr action_;

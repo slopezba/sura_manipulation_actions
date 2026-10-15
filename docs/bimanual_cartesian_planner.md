@@ -130,6 +130,14 @@ La respuesta positiva del servicio de ejecución confirma que se solicitó el in
 
 Antes de despachar se comprueban nuevamente el estado inicial, la base y la escena. Los defaults admiten `0.001 rad` en joints revolute, `0.0001 m` en prismatic y desplazamientos de base de `0.005 m / 0.01 rad`. También se revalida la curva completa con las posiciones actuales de las articulaciones no comandadas y los obstáculos actuales. Un plan que ya no cumple estas condiciones se rechaza y exige nueva planificación. Cancelar una ejecución, un rechazo parcial o un fallo después del despacho cancela todos sus goals, incluidas las aceptaciones tardías.
 
+La coherencia de las referencias guardadas se comprueba contra el estado inicial
+del propio plan. La comprobación de la curva usa la pose actual de la base y el
+frame de referencia actual, conservando el inicio del camino relativo original.
+Así, una variación de base dentro de las tolerancias de ejecución no provoca por
+sí sola `Stored plan pose references no longer match its initial state or goal`;
+las restricciones cartesianas y las colisiones siguen comprobándose en la escena
+actual.
+
 ## Activación manual de los backends
 
 Para `controller`, el operador debe cargar y activar ambos `JointTrajectoryController` y desactivar los controladores incompatibles que reclamen esas interfaces. Consulta primero el estado real:

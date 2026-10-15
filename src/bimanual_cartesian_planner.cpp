@@ -1,6 +1,7 @@
 #include "sura_manipulation_actions/bimanual_cartesian_planner.hpp"
 #include "sura_manipulation_actions/cartesian_trajectory_timing.hpp"
 #include "sura_manipulation_actions/single_arm_cartesian_planner.hpp"
+#include "sura_manipulation_actions/base_trajectory_sampling.hpp"
 
 #include <moveit/robot_model/joint_model_group.h>
 #include <moveit_msgs/msg/robot_trajectory.hpp>
@@ -161,6 +162,24 @@ public:
       return false;
     }
     const auto model = start.getRobotModel();
+    trajectory_group_name = pair.group_name;
+    if (single_arm) {
+      const auto * candidate = model->hasJointModel(options.base_joint_name) ?
+        model->getJointModel(options.base_joint_name) : nullptr;
+      if (candidate && candidate->getType() == moveit::core::JointModel::FLOATING) {
+        base_joint = candidate;
+        base_link = model->getLinkModel(options.base_frame);
+        if (!base_link || base_link->getParentJointModel() != base_joint ||
+          base_joint->getParentLinkModel() != nullptr)
+        {error = "Configured floating joint must be the vehicle root"; return false;}
+        base_offset = 6;
+        trajectory_group_name = arm_b.whole_body_group_name.empty() ?
+          "base_" + arm_b.group_name : arm_b.whole_body_group_name;
+        const auto * whole_body = model->getJointModelGroup(trajectory_group_name);
+        if (!whole_body || !whole_body->hasJointModel(options.base_joint_name))
+        {error = "Selected arm needs a whole-body group containing the floating root"; return false;}
+      }
+    }
     if (!Eigen::Map<const Eigen::VectorXd>(start.getVariablePositions(),
       static_cast<Eigen::Index>(start.getVariableCount())).allFinite())
     {error = "Initial robot state contains non-finite joint positions"; return false;}
@@ -245,6 +264,13 @@ public:
       error = "Combined planning group must contain exactly the selected arms' active joints";
       return false;
     }
+    if (base_offset) {
+      auto expected = combined;
+      expected.insert(options.base_joint_name);
+      if (active_names(model->getJointModelGroup(trajectory_group_name)) != expected)
+      {error = "Whole-body group must contain exactly the root and selected arm joints"; return false;}
+      is_prismatic = {true, true, true, false, false, false};
+    }
     for (const auto * joint : joint_group->getActiveJointModels()) {
       if (joint->isPassive()) {
         error = "Passive joints cannot be commanded by a Cartesian arm trajectory: " + joint->getName();
@@ -261,19 +287,60 @@ public:
       joint_names.push_back(joint->getVariableNames().front());
       is_prismatic.push_back(joint->getType() == moveit::core::JointModel::PRISMATIC);
     }
-    const Eigen::Index size = static_cast<Eigen::Index>(joints.size());
+    const Eigen::Index size = base_offset + static_cast<Eigen::Index>(joints.size());
     if (!options.weights.empty() && options.weights.size() != joints.size()) {
       error = "planning.weights must match the combined group's active joint count";
       return false;
     }
     joint_weights = Eigen::VectorXd::Zero(size);
     for (std::size_t i = 0; i < options.weights.size(); ++i) {
-      joint_weights(static_cast<Eigen::Index>(i)) = options.weights[i];
+      joint_weights(base_offset + static_cast<Eigen::Index>(i)) = options.weights[i];
     }
     q0.resize(size); qnom.resize(size); lower.resize(size); upper.resize(size);
     vmax.resize(size); amax.resize(size);
-    for (Eigen::Index i = 0; i < size; ++i) {
-      const auto & name = joint_names[static_cast<std::size_t>(i)];
+    if (single_arm) {
+      available_dofs = goal.available_dofs;
+      if (available_dofs.empty()) {
+        available_dofs.assign(6 + joints.size(), true);
+        std::fill(available_dofs.begin(), available_dofs.begin() + 6, false);
+      }
+      if (available_dofs.size() != 6 + joints.size())
+      {error = "available_dofs must contain six base axes followed by the selected arm joints"; return false;}
+      if (!base_offset && std::any_of(available_dofs.begin(), available_dofs.begin() + 6,
+        [](bool enabled) {return enabled;}))
+      {error = "Base motion requires a floating vehicle joint in the robot model"; return false;}
+    }
+    if (base_offset) {
+      start.update();
+      base_reference_pose = start.getGlobalLinkTransform(base_link);
+      q0.head<6>() = baseCoordinates(base_reference_pose);
+      qnom.head<6>() = q0.head<6>();
+      const auto & velocities = goal.base_velocity_limits.empty() ? options.base_velocity_limits : goal.base_velocity_limits;
+      const auto & accelerations = goal.base_acceleration_limits.empty() ? options.base_acceleration_limits : goal.base_acceleration_limits;
+      if ((!goal.base_lower_limits.empty() && goal.base_lower_limits.size() != 6) ||
+        (!goal.base_upper_limits.empty() && goal.base_upper_limits.size() != 6) ||
+        velocities.size() != 6 || accelerations.size() != 6 || options.base_weights.size() != 6)
+      {error = "Base limits and movement weights must have six entries"; return false;}
+      const double pitch_bound = std::acos(1.0e-4) - 1.0e-8;
+      for (Eigen::Index axis = 0; axis < 6; ++axis) {
+        const size_t index = static_cast<size_t>(axis);
+        lower(axis) = goal.base_lower_limits.empty() ? -OSQP_INFTY : goal.base_lower_limits[index];
+        upper(axis) = goal.base_upper_limits.empty() ? OSQP_INFTY : goal.base_upper_limits[index];
+        if (axis == 4) {lower(axis) = std::max(lower(axis), -pitch_bound); upper(axis) = std::min(upper(axis), pitch_bound);}
+        vmax(axis) = velocities[index] * options.velocity_scaling;
+        amax(axis) = accelerations[index] * options.acceleration_scaling;
+        joint_weights(axis) = options.base_weights[index];
+        if (!std::isfinite(lower(axis)) || !std::isfinite(upper(axis)) || lower(axis) > upper(axis) ||
+          q0(axis) < lower(axis) || q0(axis) > upper(axis) || !std::isfinite(vmax(axis)) ||
+          !std::isfinite(amax(axis)) || vmax(axis) <= 0.0 || amax(axis) <= 0.0 ||
+          !std::isfinite(joint_weights(axis)) || joint_weights(axis) < 0.0)
+        {error = "Invalid base bounds, dynamic limits or initial pose"; return false;}
+        if (!available_dofs[index]) {lower(axis) = upper(axis) = q0(axis);}
+      }
+    }
+    for (Eigen::Index joint_index = 0; joint_index < static_cast<Eigen::Index>(joints.size()); ++joint_index) {
+      const Eigen::Index i = base_offset + joint_index;
+      const auto & name = joint_names[static_cast<std::size_t>(joint_index)];
       const auto & bounds = model->getVariableBounds(name);
       q0(i) = start.getVariablePosition(name);
       lower(i) = bounds.position_bounded_ ? bounds.min_position_ : -OSQP_INFTY;
@@ -307,6 +374,10 @@ public:
           error = "Nominal joint posture is outside position bounds: " + name; return false;
         }
         qnom(i) = nominal->second;
+      }
+      if (single_arm && !available_dofs[6 + static_cast<size_t>(joint_index)]) {
+        lower(i) = upper(i) = q0(i);
+        qnom(i) = q0(i);
       }
     }
     start.update();
@@ -344,14 +415,21 @@ public:
     const Eigen::Matrix3d delta = result.arm_b.rotation() * result.arm_a.rotation().transpose();
     result.relative_jacobian.bottomRows(3) = rotation *
       (arm_b_jacobian.bottomRows(3) - delta * result.arm_a_jacobian.bottomRows(3));
+    if (single_arm && reference_frame == start.getRobotModel()->getModelFrame()) {
+      const Eigen::Matrix3d tolerance_from_reference =
+        goal.world_from_tolerance.rotation().transpose() * model_from_reference.rotation();
+      result.relative_jacobian.topRows(3) = tolerance_from_reference * result.relative_jacobian.topRows(3).eval();
+      result.relative_jacobian.bottomRows(3) = tolerance_from_reference * result.relative_jacobian.bottomRows(3).eval();
+    }
     return result;
   }
 
   moveit::core::RobotState stateAt(const Eigen::VectorXd & q) const
   {
     auto state = start;
-    for (Eigen::Index i = 0; i < q.size(); ++i) {
-      state.setVariablePosition(joint_names[static_cast<std::size_t>(i)], q(i));
+    if (base_offset) {state.setJointPositions(base_joint, basePose(q.head<6>()));}
+    for (size_t i = 0; i < joint_names.size(); ++i) {
+      state.setVariablePosition(joint_names[i], q(base_offset + static_cast<Eigen::Index>(i)));
     }
     state.update();
     return state;
@@ -365,6 +443,12 @@ public:
     error.head<3>() = target.translation() - current.relative.translation();
     error.tail<3>() = BimanualCartesianPlanner::orientationError(
       target.rotation(), current.relative.rotation());
+    if (single_arm && reference_frame == start.getRobotModel()->getModelFrame()) {
+      const Eigen::Matrix3d tolerance_from_reference =
+        goal.world_from_tolerance.rotation().transpose() * model_from_reference.rotation();
+      error.head<3>() = tolerance_from_reference * error.head<3>().eval();
+      error.tail<3>() = tolerance_from_reference * error.tail<3>().eval();
+    }
     return error;
   }
 
@@ -556,8 +640,271 @@ public:
     }
   }
 
+  bool generalizedTrajectory(
+    const std::vector<Waypoint> & points, trajectory_msgs::msg::JointTrajectory & msg,
+    std::string & error) const
+  {
+    robot_trajectory::RobotTrajectory arm_timing(start.getRobotModel(), arm_b.group_name);
+    for (const auto & point : points) {arm_timing.addSuffixWayPoint(stateAt(point.q), 0.0);}
+    if (!timing::parameterize(arm_timing, joint_names, options.velocity_scaling,
+      options.acceleration_scaling, error)) {return false;}
+    moveit_msgs::msg::RobotTrajectory robot_message;
+    arm_timing.getRobotTrajectoryMsg(robot_message, joint_names);
+    const auto & arm = robot_message.joint_trajectory;
+    if (!validMessage(arm, error) || arm.points.size() != points.size()) {return false;}
+    std::vector<size_t> order;
+    for (const auto & name : joint_names) {
+      const auto found = std::find(arm.joint_names.begin(), arm.joint_names.end(), name);
+      if (found == arm.joint_names.end()) {error = "IPTP omitted a selected arm joint"; return false;}
+      order.push_back(static_cast<size_t>(std::distance(arm.joint_names.begin(), found)));
+    }
+    msg = trajectory_msgs::msg::JointTrajectory();
+    msg.joint_names = {"base_x", "base_y", "base_z", "base_roll", "base_pitch", "base_yaw"};
+    msg.joint_names.insert(msg.joint_names.end(), joint_names.begin(), joint_names.end());
+    std::vector<double> intervals(points.size(), 0.0);
+    double common_dilation = 1.0;
+    for (size_t i = 1; i < points.size(); ++i) {
+      intervals[i] = seconds(arm.points[i].time_from_start) - seconds(arm.points[i - 1].time_from_start);
+      if (!std::isfinite(intervals[i]) || intervals[i] <= 0.0)
+      {error = "Arm timing returned an invalid whole-body interval"; return false;}
+      for (Eigen::Index axis = 0; axis < 6; ++axis) {
+        const double displacement = std::abs(points[i].q(axis) - points[i - 1].q(axis));
+        const double base_duration = std::max(1.875 * displacement / vmax(axis),
+          std::sqrt(5.774 * displacement / amax(axis)));
+        common_dilation = std::max(common_dilation, base_duration / intervals[i]);
+      }
+    }
+    for (auto & interval : intervals) {interval *= common_dilation;}
+    for (size_t i = 0; i < points.size(); ++i) {
+      trajectory_msgs::msg::JointTrajectoryPoint point;
+      point.positions.assign(points[i].q.data(), points[i].q.data() + points[i].q.size());
+      point.velocities.assign(static_cast<size_t>(q0.size()), 0.0);
+      point.accelerations.assign(static_cast<size_t>(q0.size()), 0.0);
+      if (arm.points[i].velocities.size() != joint_names.size() ||
+        arm.points[i].accelerations.size() != joint_names.size())
+      {error = "IPTP omitted arm boundary derivatives"; return false;}
+      for (size_t joint = 0; joint < joint_names.size(); ++joint) {
+        point.velocities[joint + 6] = arm.points[i].velocities[order[joint]] / common_dilation;
+        point.accelerations[joint + 6] = arm.points[i].accelerations[order[joint]] /
+          (common_dilation * common_dilation);
+      }
+      point.time_from_start = duration(seconds(arm.points[i].time_from_start) * common_dilation);
+      msg.points.push_back(std::move(point));
+    }
+    // Shared nonzero boundary slopes give C2 motion through monotone waypoints.
+    // Reversals and stationary axes have zero slope, avoiding bound overshoot.
+    for (size_t i = 1; i + 1 < points.size(); ++i) {
+      for (Eigen::Index axis = 0; axis < 6; ++axis) {
+        const double before = (points[i].q(axis) - points[i - 1].q(axis)) / intervals[i];
+        const double after = (points[i + 1].q(axis) - points[i].q(axis)) / intervals[i + 1];
+        if (before * after > 0.0) {
+          msg.points[i].velocities[static_cast<size_t>(axis)] =
+            std::copysign(std::min(std::abs(before), std::abs(after)), before);
+        }
+      }
+    }
+    return true;
+  }
+
+  void splitWholeBody(
+    const trajectory_msgs::msg::JointTrajectory & generalized, PlannedTrajectory & output) const
+  {
+    output.joint_trajectory.joint_names = joint_names;
+    output.base_trajectory.header.frame_id = start.getRobotModel()->getModelFrame();
+    output.base_trajectory.joint_names = {options.base_joint_name};
+    output.available_dofs = available_dofs;
+    output.base_reference_pose = base_reference_pose;
+    output.trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(
+      start.getRobotModel(), trajectory_group_name);
+    double previous_time = 0.0;
+    for (const auto & full : generalized.points) {
+      trajectory_msgs::msg::JointTrajectoryPoint joints_point;
+      joints_point.positions.assign(full.positions.begin() + 6, full.positions.end());
+      joints_point.velocities.assign(full.velocities.begin() + 6, full.velocities.end());
+      joints_point.accelerations.assign(full.accelerations.begin() + 6, full.accelerations.end());
+      joints_point.time_from_start = full.time_from_start;
+      output.joint_trajectory.points.push_back(std::move(joints_point));
+      const Eigen::Map<const BaseCoordinates> coordinates(full.positions.data());
+      const Eigen::Map<const BaseCoordinates> velocity(full.velocities.data());
+      const Eigen::Map<const BaseCoordinates> acceleration(full.accelerations.data());
+      output.base_trajectory.points.push_back(baseTrajectoryPoint(
+        coordinates, velocity, acceleration, full.time_from_start));
+      const Eigen::Map<const Eigen::VectorXd> q(full.positions.data(), q0.size());
+      auto state = stateAt(q);
+      for (size_t i = 0; i < joint_names.size(); ++i) {
+        state.setVariableVelocity(joint_names[i], full.velocities[i + 6]);
+        state.setVariableAcceleration(joint_names[i], full.accelerations[i + 6]);
+      }
+      const double time = seconds(full.time_from_start);
+      output.trajectory->addSuffixWayPoint(state, time - previous_time);
+      previous_time = time;
+    }
+  }
+
+  bool mergeWholeBody(
+    const PlannedTrajectory & plan, trajectory_msgs::msg::JointTrajectory & generalized,
+    std::vector<BaseTrajectoryKnot> & base_knots, std::string & error) const
+  {
+    const auto & arms = plan.joint_trajectory;
+    if (!validMessage(arms, error) || !prepareBaseTrajectory(plan.base_trajectory, base_knots, error) ||
+      arms.joint_names != joint_names || arms.points.size() != base_knots.size() ||
+      plan.base_trajectory.header.frame_id != start.getRobotModel()->getModelFrame() ||
+      plan.base_trajectory.joint_names != std::vector<std::string>{options.base_joint_name})
+    {error = "Stored arm/base trajectories have inconsistent joints, dimensions or frames: " + error; return false;}
+    generalized = trajectory_msgs::msg::JointTrajectory();
+    generalized.joint_names = {"base_x", "base_y", "base_z", "base_roll", "base_pitch", "base_yaw"};
+    generalized.joint_names.insert(generalized.joint_names.end(), joint_names.begin(), joint_names.end());
+    for (size_t i = 0; i < arms.points.size(); ++i) {
+      const auto & a = arms.points[i];
+      const auto & b = base_knots[i];
+      if (std::abs(seconds(a.time_from_start) - b.time) > 1.0e-9 ||
+        a.velocities.size() != joint_names.size() || a.accelerations.size() != joint_names.size() ||
+        !b.has_velocity || !b.has_acceleration)
+      {error = "Arm and base need common times and complete boundary derivatives"; return false;}
+      trajectory_msgs::msg::JointTrajectoryPoint point;
+      point.positions.assign(b.coordinates.data(), b.coordinates.data() + 6);
+      point.velocities.assign(b.velocity.data(), b.velocity.data() + 6);
+      point.accelerations.assign(b.acceleration.data(), b.acceleration.data() + 6);
+      point.positions.insert(point.positions.end(), a.positions.begin(), a.positions.end());
+      point.velocities.insert(point.velocities.end(), a.velocities.begin(), a.velocities.end());
+      point.accelerations.insert(point.accelerations.end(), a.accelerations.begin(), a.accelerations.end());
+      point.time_from_start = a.time_from_start;
+      generalized.points.push_back(std::move(point));
+    }
+    return validMessage(generalized, error);
+  }
+
+  bool checkWholeBody(
+    const PlannedTrajectory & plan, double & stretch, size_t & bad_segment, std::string & error) const
+  {
+    trajectory_msgs::msg::JointTrajectory msg;
+    std::vector<BaseTrajectoryKnot> base_knots;
+    if (!mergeWholeBody(plan, msg, base_knots, error) || plan.progress_values.size() != msg.points.size() ||
+      msg.points.size() < 2 || seconds(msg.points.front().time_from_start) != 0.0 ||
+      plan.progress_values.front() != 0.0 || plan.progress_values.back() != 1.0)
+    {error = "Stored whole-body trajectory has inconsistent times or progress: " + error; return false;}
+    for (size_t i = 0; i < plan.progress_values.size(); ++i) {
+      if (!std::isfinite(plan.progress_values[i]) || plan.progress_values[i] < 0.0 ||
+        plan.progress_values[i] > 1.0 || (i && plan.progress_values[i] <= plan.progress_values[i - 1]))
+      {error = "Stored whole-body progress must be strictly increasing"; return false;}
+    }
+    stretch = 1.0;
+    bad_segment = msg.points.size();
+    for (size_t segment = 1; segment < msg.points.size(); ++segment) {
+      if (stopped(error)) {return false;}
+      const auto & a = msg.points[segment - 1];
+      const auto & b = msg.points[segment];
+      const double begin = seconds(a.time_from_start), span = seconds(b.time_from_start) - begin;
+      int samples = 4;
+      if (!growSampleCount(span / options.validation_time_step, 20000, samples, error)) {return false;}
+      for (Eigen::Index axis = 0; axis < q0.size(); ++axis) {
+        const auto c = polynomial(a, b, static_cast<size_t>(axis), span);
+        const auto positions = extrema(c, 1), velocities = extrema(c, 2), accelerations = extrema(c, 3);
+        if (positions.empty() || velocities.empty() || accelerations.empty())
+        {error = "Could not calculate whole-body polynomial extrema"; return false;}
+        for (const double u : positions) {
+          const double value = timing::evaluate(c, u);
+          if (value < lower(axis) - 1.0e-9 || value > upper(axis) + 1.0e-9) {
+            bad_segment = segment; error = "Whole-body interpolation exceeds pose/joint bounds";
+          }
+        }
+        double peak_velocity = 0.0;
+        for (const double u : velocities) {
+          peak_velocity = std::max(peak_velocity, std::abs(timing::evaluate(c, u, 1) / span));
+        }
+        stretch = std::max(stretch, peak_velocity / vmax(axis));
+        for (const double u : accelerations) {
+          stretch = std::max(stretch, std::sqrt(std::abs(timing::evaluate(c, u, 2) / (span * span)) / amax(axis)));
+        }
+        const double resolution = is_prismatic[static_cast<size_t>(axis)] ?
+          options.validation_prismatic_step : options.validation_joint_step;
+        if (!growSampleCount(peak_velocity * span / resolution, 20000, samples, error)) {return false;}
+      }
+      if (bad_segment != msg.points.size()) {return true;}
+      trajectory_msgs::msg::JointTrajectoryPoint arm_sample;
+      BaseTrajectorySample base_sample;
+      for (int index = 0; index <= samples; ++index) {
+        if (stopped(error)) {return false;}
+        const double u = static_cast<double>(index) / samples;
+        interpolateSegment(plan.joint_trajectory.points[segment - 1],
+          plan.joint_trajectory.points[segment], u, span, arm_sample);
+        if (!sampleBaseTrajectory(base_knots, begin + u * span, base_sample, error)) {return false;}
+        Eigen::VectorXd q(q0.size());
+        q.head<6>() = base_sample.coordinates;
+        for (size_t joint = 0; joint < joint_names.size(); ++joint) {
+          q(6 + static_cast<Eigen::Index>(joint)) = arm_sample.positions[joint];
+        }
+        if (segment == 1 && index == 0 && (q - q0).cwiseAbs().maxCoeff() > 1.0e-9)
+        {error = "Stored whole-body trajectory does not begin at the measured state"; return false;}
+        const double s = index == 0 ? plan.progress_values[segment - 1] :
+          (index == samples ? plan.progress_values[segment] : projectedProgress(q,
+          plan.progress_values[segment - 1], plan.progress_values[segment]));
+        if (!valid(q, s, error)) {bad_segment = segment; return true;}
+      }
+    }
+    return true;
+  }
+
+  bool timeWholeBody(std::vector<Waypoint> & points, PlannedTrajectory & output, std::string & error) const
+  {
+    for (int refinement = 0; refinement <= options.max_timing_refinements; ++refinement) {
+      if (stopped(error)) {return false;}
+      trajectory_msgs::msg::JointTrajectory generalized;
+      if (!generalizedTrajectory(points, generalized, error)) {return false;}
+      PlannedTrajectory candidate;
+      splitWholeBody(generalized, candidate);
+      for (const auto & point : points) {candidate.progress_values.push_back(point.progress);}
+      double stretch;
+      size_t bad_segment;
+      if (!checkWholeBody(candidate, stretch, bad_segment, error)) {return false;}
+      if (bad_segment == points.size()) {
+        if (stretch > 1.0 + 1.0e-8) {
+          stretch *= 1.001;
+          for (auto & point : generalized.points) {
+            point.time_from_start = duration(seconds(point.time_from_start) * stretch);
+            for (auto & value : point.velocities) {value /= stretch;}
+            for (auto & value : point.accelerations) {value /= stretch * stretch;}
+          }
+          candidate = PlannedTrajectory();
+          splitWholeBody(generalized, candidate);
+          for (const auto & point : points) {candidate.progress_values.push_back(point.progress);}
+        }
+        if (!validateWholeBodyTimed(candidate, error)) {return false;}
+        output = std::move(candidate);
+        return true;
+      }
+      if (refinement == options.max_timing_refinements ||
+        points.size() >= static_cast<size_t>(options.max_waypoints))
+      {error = "Whole-body interpolation remains invalid after refinement: " + error; return false;}
+      const auto before = points[bad_segment - 1];
+      const auto after = points[bad_segment];
+      Waypoint midpoint{0.5 * (before.q + after.q), 0.5 * (before.progress + after.progress)};
+      if (!valid(midpoint.q, midpoint.progress, error)) {
+        Eigen::VectorXd replacement;
+        if (!solveWaypoint(midpoint.progress, before.q, midpoint.q, replacement, error)) {return false;}
+        midpoint.q = std::move(replacement);
+      }
+      if (!segmentValid(before, midpoint, error) || !segmentValid(midpoint, after, error)) {return false;}
+      points.insert(points.begin() + static_cast<std::ptrdiff_t>(bad_segment), std::move(midpoint));
+    }
+    error = "Whole-body time parameterization failed";
+    return false;
+  }
+
+  bool validateWholeBodyTimed(const PlannedTrajectory & plan, std::string & error) const
+  {
+    double stretch;
+    size_t bad_segment;
+    if (!checkWholeBody(plan, stretch, bad_segment, error)) {return false;}
+    if (bad_segment != plan.joint_trajectory.points.size()) {return false;}
+    if (stretch > 1.0 + 1.0e-6)
+    {error = "Stored whole-body trajectory exceeds velocity or acceleration bounds"; return false;}
+    return true;
+  }
+
   bool timeAndValidate(std::vector<Waypoint> & points, PlannedTrajectory & output, std::string & error) const
   {
+    if (base_offset) {return timeWholeBody(points, output, error);}
     for (int refinement = 0; refinement <= options.max_timing_refinements; ++refinement) {
       if (stopped(error)) {return false;}
       auto trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(start.getRobotModel(), pair.group_name);
@@ -667,6 +1014,7 @@ public:
 
   bool validateTimed(const PlannedTrajectory & plan, std::string & error) const
   {
+    if (base_offset) {return validateWholeBodyTimed(plan, error);}
     const auto & msg = plan.joint_trajectory;
     if (!validMessage(msg, error) || plan.progress_values.size() != msg.points.size() ||
       plan.progress_values.size() < 2 || seconds(msg.points.front().time_from_start) != 0.0 ||
@@ -754,6 +1102,12 @@ public:
   const BimanualCartesianPlanner::CancelCheck & canceled;
   const BimanualCartesianPlanner::Progress & feedback;
   bool single_arm;
+  Eigen::Index base_offset = 0;
+  const moveit::core::JointModel * base_joint = nullptr;
+  const moveit::core::LinkModel * base_link = nullptr;
+  std::string trajectory_group_name;
+  std::vector<bool> available_dofs;
+  Eigen::Isometry3d base_reference_pose = Eigen::Isometry3d::Identity();
   std::chrono::steady_clock::time_point deadline;
   const moveit::core::LinkModel * arm_a_tip = nullptr;
   const moveit::core::LinkModel * arm_b_tip = nullptr;
@@ -805,12 +1159,22 @@ private:
     const auto * reference = group->getJointModels().front()->getParentLinkModel();
     Eigen::Matrix3d rotation = Eigen::Matrix3d::Identity();
     if (reference) {rotation = state.getGlobalLinkTransform(reference).rotation();}
-    Eigen::MatrixXd result = Eigen::MatrixXd::Zero(6, static_cast<Eigen::Index>(joints.size()));
+    Eigen::MatrixXd result = Eigen::MatrixXd::Zero(6, q0.size());
+    if (base_offset) {
+      const auto base = baseCoordinates(state.getGlobalLinkTransform(base_link));
+      const auto angular_map = baseAngularVelocityMap(base);
+      const Eigen::Vector3d offset = state.getGlobalLinkTransform(tip).translation() - base.head<3>();
+      result.topLeftCorner<3, 3>().setIdentity();
+      for (Eigen::Index axis = 0; axis < 3; ++axis) {
+        result.block<3, 1>(0, axis + 3) = angular_map.col(axis).cross(offset);
+        result.block<3, 1>(3, axis + 3) = angular_map.col(axis);
+      }
+    }
     const auto & variables = group->getVariableNames();
     for (std::size_t i = 0; i < variables.size(); ++i) {
       const auto found = std::find(joint_names.begin(), joint_names.end(), variables[i]);
       if (found == joint_names.end()) {continue;}
-      const Eigen::Index column = std::distance(joint_names.begin(), found);
+      const Eigen::Index column = base_offset + std::distance(joint_names.begin(), found);
       result.col(column).head<3>() = rotation * local.col(static_cast<Eigen::Index>(i)).head<3>();
       result.col(column).tail<3>() = rotation * local.col(static_cast<Eigen::Index>(i)).tail<3>();
     }
@@ -842,6 +1206,11 @@ bool validOptions(const GoalSpec & goal, const Options & options, std::string & 
     std::abs(goal.relative_target.rotation().determinant() - 1.0) > 1.0e-6 ||
     (goal.relative_target.matrix().row(3) - Eigen::RowVector4d(0.0, 0.0, 0.0, 1.0)).norm() > 1.0e-9)
   {error = "Relative target is not a finite rigid transform"; return false;}
+  if (!goal.world_from_tolerance.matrix().allFinite() ||
+    (goal.world_from_tolerance.rotation().transpose() * goal.world_from_tolerance.rotation() -
+    Eigen::Matrix3d::Identity()).norm() > 1.0e-6 ||
+    std::abs(goal.world_from_tolerance.rotation().determinant() - 1.0) > 1.0e-6)
+  {error = "Cartesian tolerance frame is not a finite rigid transform"; return false;}
   for (const auto * values : {&goal.relative_position_tolerance, &goal.relative_orientation_tolerance})
   {
     if (!values->allFinite() || (values->array() < 0.0).any()) {
@@ -973,6 +1342,10 @@ bool planCartesian(
     completed.model_from_reference = context.model_from_reference;
     completed.initial_relative_pose = context.relative0;
     completed.relative_target = goal.relative_target;
+    if (single_arm) {
+      completed.available_dofs = context.available_dofs;
+      completed.base_reference_pose = context.base_reference_pose;
+    }
     output = std::move(completed);
     message = single_arm ? "Valid single-arm Cartesian joint trajectory planned" :
       "Valid constrained bimanual Cartesian joint trajectory planned";
@@ -1006,17 +1379,41 @@ bool validateCartesian(
         baseline.setVariablePosition(name, plan.trajectory->getFirstWayPoint().getVariablePosition(name));
       }
     }
+    if (single_arm && !plan.base_trajectory.points.empty() &&
+      scene->getRobotModel()->getRootJoint()->getType() == moveit::core::JointModel::FLOATING) {
+      const auto * base = scene->getRobotModel()->getJointModel(options.base_joint_name);
+      if (!base || base->getType() != moveit::core::JointModel::FLOATING)
+      {message = "Stored base trajectory no longer has a floating robot root"; return false;}
+      for (const auto & name : base->getVariableNames()) {
+        baseline.setVariablePosition(name, plan.trajectory->getFirstWayPoint().getVariablePosition(name));
+      }
+    }
     baseline.update();
     const BimanualCartesianPlanner::Progress progress;
     PlanningContext context(scene, baseline, arm_a, arm_b,
       pair, goal, options, canceled, progress, single_arm);
     if (context.stopped(message) || !context.initialize(message)) {return false;}
+    // Check snapshot integrity against the recorded start, not the live base.
+    // Base/mount drift is bounded by the action server before revalidation;
+    // even admissible drift changes these poses in model coordinates.
+    auto recorded_start = plan.trajectory->getFirstWayPoint();
+    recorded_start.update();
+    const Eigen::Isometry3d recorded_reference =
+      context.reference_frame == scene->getRobotModel()->getModelFrame() ?
+      Eigen::Isometry3d::Identity() : recorded_start.getGlobalLinkTransform(context.reference_frame);
+    const Eigen::Isometry3d recorded_arm_a = single_arm ? recorded_reference :
+      recorded_start.getGlobalLinkTransform(arm_a.tip_frame);
+    const auto recorded_relative = BimanualCartesianPlanner::relativePoseInReference(
+      recorded_arm_a, recorded_start.getGlobalLinkTransform(arm_b.tip_frame), recorded_reference);
     if (context.reference_frame != plan.reference_frame ||
-      (context.model_from_reference.matrix() - plan.model_from_reference.matrix()).norm() > 1.0e-8 ||
-      (context.arm_a0.matrix() - plan.initial_arm_a_pose.matrix()).norm() > 1.0e-8 ||
-      (context.relative0.matrix() - plan.initial_relative_pose.matrix()).norm() > 1.0e-8 ||
+      (recorded_reference.matrix() - plan.model_from_reference.matrix()).norm() > 1.0e-8 ||
+      (recorded_arm_a.matrix() - plan.initial_arm_a_pose.matrix()).norm() > 1.0e-8 ||
+      (recorded_relative.matrix() - plan.initial_relative_pose.matrix()).norm() > 1.0e-8 ||
       (goal.relative_target.matrix() - plan.relative_target.matrix()).norm() > 1.0e-8)
     {message = "Stored plan pose references no longer match its initial state or goal"; return false;}
+    // Keep the original nominal path while checking FK/collisions with the live
+    // non-commanded joints and the current transform of the reference frame.
+    context.relative0 = plan.initial_relative_pose;
     if (!context.validateTimed(plan, message)) {return false;}
     message = "Stored quintic trajectory is valid in the current planning scene";
     return true;

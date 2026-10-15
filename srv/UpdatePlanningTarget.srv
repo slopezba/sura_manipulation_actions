@@ -1,0 +1,14 @@
+uint8 EDIT=0
+uint8 READ_TF=1
+uint8 LOCK=2
+uint8 RELEASE=3
+uint8 BIND_GOAL=4
+uint8 HEARTBEAT=5
+uint8 operation
+string client_id
+uint64 expected_revision
+PlanningTargetState target
+---
+bool success
+string message
+PlanningTargetState state

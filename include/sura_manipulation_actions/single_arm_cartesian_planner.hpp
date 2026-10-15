@@ -7,7 +7,10 @@ namespace sura_manipulation_actions::bimanual_cartesian
 
 // Single-arm entry point to the shared constrained Cartesian solver. In this
 // mode GoalSpec::relative_target is an absolute tip pose in reference_frame.
-// Only the selected arm's joints participate.
+// available_dofs fixes unselected world base coordinates and arm joints to
+// their measured starts. A configured floating root produces synchronized
+// MultiDOF base and selected-arm trajectories; fixed-root models retain the
+// joint-only solver path.
 class SingleArmCartesianPlanner
 {
 public:

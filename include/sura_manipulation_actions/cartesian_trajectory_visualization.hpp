@@ -20,6 +20,7 @@ struct CartesianViews
   nav_msgs::msg::Path arm_b_path;
   nav_msgs::msg::Path relative_path;
   nav_msgs::msg::Path desired_relative_path;
+  nav_msgs::msg::Path base_path;
 };
 
 class CartesianTrajectoryVisualization
@@ -38,6 +39,7 @@ public:
   CartesianViews publishSingleArm(
     const bimanual_cartesian::PlannedTrajectory & plan,
     const bimanual_cartesian::Arm & arm);
+  CartesianViews publishPosePath(const nav_msgs::msg::Path & desired);
 
 private:
   struct PathCache
@@ -54,6 +56,8 @@ private:
   mutable tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr joint_pub_;
+  rclcpp::Publisher<trajectory_msgs::msg::MultiDOFJointTrajectory>::SharedPtr base_trajectory_pub_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr base_path_pub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr arm_a_pub_, arm_b_pub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr relative_pub_, desired_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
