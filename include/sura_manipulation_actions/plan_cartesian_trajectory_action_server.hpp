@@ -14,6 +14,7 @@
 #include "std_srvs/srv/trigger.hpp"
 #include "sura_manipulation_actions/action/plan_cartesian_trajectory.hpp"
 #include "sura_manipulation_actions/action/follow_cartesian_trajectory.hpp"
+#include "sura_manipulation_actions/action/check_cartesian_trajectory.hpp"
 #include "sura_manipulation_actions/single_arm_cartesian_planner.hpp"
 #include "sura_manipulation_actions/cartesian_moveit_context.hpp"
 #include "sura_manipulation_actions/cartesian_trajectory_visualization.hpp"
@@ -30,6 +31,8 @@ public:
   using Handle = rclcpp_action::ServerGoalHandle<Action>;
   using FollowAction = sura_manipulation_actions::action::FollowCartesianTrajectory;
   using FollowHandle = rclcpp_action::ClientGoalHandle<FollowAction>;
+  using CheckAction = sura_manipulation_actions::action::CheckCartesianTrajectory;
+  using CheckHandle = rclcpp_action::ClientGoalHandle<CheckAction>;
   using CallbackReturn = rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn;
   explicit PlanCartesianTrajectoryActionServer(
     const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
@@ -43,7 +46,8 @@ private:
   };
   struct PoseEndpoint
   {
-    std::string controller_node, task_id, target_topic, feedforward_topic;
+    std::string controller_node, task_id, target_topic, feedforward_topic, check_action;
+    rclcpp_action::Client<CheckAction>::SharedPtr checker;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr target;
     rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr feedforward;
   };
@@ -81,6 +85,8 @@ private:
   void planPoseGoal(const std::shared_ptr<PendingPlan> & pending);
   void executePosePlan(const std::shared_ptr<PendingPlan> & pending);
   bool poseBackendReady(const PendingPlan & pending, bool & auto_update, std::string & error);
+  bool checkPoseTrajectory(const PendingPlan &, uint64_t & validation_id,
+    bool & retryable, std::string & error);
   bool validatePosePending(const PendingPlan & pending, std::string & error) const;
   bool readTipPose(const PendingPlan & pending, Eigen::Isometry3d & pose, std::string & error) const;
   void executeCoordinated(const std::shared_ptr<PendingPlan> & pending);
@@ -112,6 +118,7 @@ private:
   double base_position_tolerance_{0.005}, base_orientation_tolerance_{0.01};
   double pose_linear_velocity_{1.0}, pose_angular_velocity_{0.5};
   double pose_linear_acceleration_{0.4}, pose_angular_acceleration_{0.2};
+  double stpik_timeout_{35.0};
   bimanual_cartesian::Options planner_options_;
   sura_manipulation_actions::msg::TrajectoryTrackingTolerances default_tracking_tolerances_;
   ExecutionOptions execution_options_;

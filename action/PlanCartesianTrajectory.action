@@ -15,9 +15,11 @@ float64 planning_time
 float64 velocity_scaling
 float64 acceleration_scaling
 # Empty uses the server default; otherwise "controller", "task" or "pose".
-# "pose" streams Cartesian tool references into the configured pose task.
+# "pose" optionally runs an isolated STPIK check, then streams tool references.
 # Mobility/base limits and base/joint tracking tolerances are unused in pose mode.
 string execution_backend
+# Pose execution only: validate offline before streaming. Other backends ignore this.
+bool use_stpik true
 # false publishes a plan and waits for execute_pending_trajectory.
 bool execute
 ---
@@ -27,7 +29,7 @@ trajectory_msgs/JointTrajectory joint_trajectory
 trajectory_msgs/MultiDOFJointTrajectory base_trajectory
 nav_msgs/Path base_path
 nav_msgs/Path path
-# In pose mode only desired_path is populated: geometry is not IK/collision validated.
+# In pose mode only desired_path is populated; optional STPIK runs on Execute.
 nav_msgs/Path desired_path
 ---
 float32 progress

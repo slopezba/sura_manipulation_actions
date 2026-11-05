@@ -223,5 +223,25 @@ TEST(CartesianPosePath, RejectsInvalidPosesLimitsAndExcessiveWaypoints)
   EXPECT_TRUE(path.sampleVelocity(0.1).isZero(0.0));
 }
 
+TEST(CartesianPosePathTest, TimedDescriptorPreservesTranslationOrientationAndFeedforwardAtPi)
+{
+  for (double angle : {0.0, 0.4, -0.4, std::acos(-1.0), -std::acos(-1.0)}) {
+    Eigen::Isometry3d start = Eigen::Isometry3d::Identity();
+    start.linear() = Eigen::AngleAxisd(1.1, Eigen::Vector3d(1,2,-1).normalized()).toRotationMatrix();
+    Eigen::Isometry3d target = start;
+    target.translation() << 0.1,-0.2,0.05;
+    target.linear() = start.rotation() * Eigen::AngleAxisd(angle, Eigen::Vector3d(-2,1,1).normalized()).toRotationMatrix();
+    CartesianPosePath live, offline; std::string reason;
+    ASSERT_TRUE(live.init(start, target, 0.2,0.3,0.4,0.5,0.01,0.05,1000,reason));
+    ASSERT_TRUE(offline.initTimed(live.descriptor("world"), reason)) << reason;
+    EXPECT_DOUBLE_EQ(live.duration(), offline.duration());
+    for (int i = 0; i <= 100; ++i) {
+      const double time = live.duration() * i / 100.0;
+      EXPECT_TRUE(live.sample(time).isApprox(offline.sample(time), 1e-12));
+      EXPECT_TRUE(live.sampleVelocity(time).isApprox(offline.sampleVelocity(time), 1e-12));
+    }
+  }
+}
+
 }  // namespace
 }  // namespace sura_manipulation_actions

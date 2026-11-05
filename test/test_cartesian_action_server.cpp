@@ -38,6 +38,8 @@ using FollowAction = control_msgs::action::FollowJointTrajectory;
 using FollowHandle = rclcpp_action::ServerGoalHandle<FollowAction>;
 using CartesianFollowAction = sura_manipulation_actions::action::FollowCartesianTrajectory;
 using CartesianFollowHandle = rclcpp_action::ServerGoalHandle<CartesianFollowAction>;
+using CheckAction = sura_manipulation_actions::action::CheckCartesianTrajectory;
+using CheckServerHandle = rclcpp_action::ServerGoalHandle<CheckAction>;
 using Trigger = std_srvs::srv::Trigger;
 
 const char * kUrdf = R"(
@@ -109,6 +111,7 @@ protected:
       rclcpp::Parameter("robot_description_semantic", std::string(kSrdf)),
       rclcpp::Parameter("joint_states_topic", ns_ + "/joint_states"),
       rclcpp::Parameter("execution_backend", "controller"),
+      rclcpp::Parameter("pose.stpik_timeout", 1.0),
       rclcpp::Parameter("execution.coordinated_action", ns_ + "/follow_cartesian_trajectory"),
       rclcpp::Parameter("execution.base_manager_service", ns_ + "/controller_manager/list_controllers"),
       rclcpp::Parameter("arm_names", std::vector<std::string>{"A", "B"}),
@@ -217,6 +220,39 @@ protected:
       [this](std::shared_ptr<CartesianFollowHandle> handle) {
         std::lock_guard<std::mutex> lock(observation_mutex_); coordinated_handle_ = handle;
       });
+    checker_ = rclcpp_action::create_server<CheckAction>(fake_, ns_ + "/task_priority/check_cartesian_trajectory",
+      [this](const rclcpp_action::GoalUUID &, std::shared_ptr<const CheckAction::Goal> goal) {
+        {std::lock_guard<std::mutex> lock(observation_mutex_); checked_goal_ = *goal;}
+        check_requests_.fetch_add(1); return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+      }, [this](std::shared_ptr<CheckServerHandle>) {
+        check_cancels_.fetch_add(1); return rclcpp_action::CancelResponse::ACCEPT;
+      }, [this](std::shared_ptr<CheckServerHandle> handle) {
+        std::lock_guard<std::mutex> lock(observation_mutex_); check_handle_ = handle;
+      });
+    check_timer_ = fake_->create_wall_timer(std::chrono::milliseconds(5), [this]() {
+      std::shared_ptr<CheckServerHandle> handle;
+      {std::lock_guard<std::mutex> lock(observation_mutex_);
+        if (!check_handle_ || (hold_check_.load() && !check_handle_->is_canceling())) {return;}
+        handle = std::move(check_handle_);}
+      auto result = std::make_shared<CheckAction::Result>();
+      result->outcome = check_outcome_.load();
+      if (handle->get_goal()->validation_id != 0 && stale_check_.load()) {
+        result->outcome = CheckAction::Result::UNAVAILABLE;
+      }
+      result->code = result->outcome == CheckAction::Result::FAIL ? "COLLISION_CLEARANCE" :
+        result->outcome == CheckAction::Result::UNAVAILABLE ? "CHECK_UNAVAILABLE" : "SUCCESS";
+      result->message = "fixture check"; result->validation_id = 42;
+      if (stalled_check_.load() && result->outcome == CheckAction::Result::FAIL) {
+        result->code = "STALLED"; result->constraint = "position";
+        result->message = "stalled=position; position_stalled=true; orientation_stalled=false; measured_delta_m=0";
+        result->tracking_error[2] = 0.00124;
+      }
+      result->time_from_start = 0.12; result->joint_names = {"left_joint", "right_joint"};
+      result->joint_positions = {0.1,0.2};
+      if (handle->is_canceling()) {handle->canceled(result);}
+      else if (result->outcome == CheckAction::Result::SUCCESS) {handle->succeed(result);}
+      else {handle->abort(result);}
+    });
     tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(fake_);
     for (std::size_t side = 0; side < 2; ++side) {
       const std::string prefix = ns_ + "/task_priority/tasks/" + (side == 0 ? "left_pose" : "right_pose");
@@ -442,6 +478,14 @@ protected:
   rclcpp::Service<controller_manager_msgs::srv::SwitchController>::SharedPtr switch_service_;
   std::vector<rclcpp_action::Server<FollowAction>::SharedPtr> backends_;
   rclcpp_action::Server<CartesianFollowAction>::SharedPtr coordinated_backend_;
+  rclcpp_action::Server<CheckAction>::SharedPtr checker_;
+  std::shared_ptr<CheckServerHandle> check_handle_;
+  rclcpp::TimerBase::SharedPtr check_timer_;
+  std::atomic_int check_requests_{0}, check_cancels_{0};
+  std::atomic<uint8_t> check_outcome_{CheckAction::Result::SUCCESS};
+  std::atomic_bool hold_check_{false}, stale_check_{false};
+  std::atomic_bool stalled_check_{false};
+  CheckAction::Goal checked_goal_;
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> tf_broadcaster_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> dynamic_tf_broadcaster_;
   std::vector<rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr> pose_target_subs_;
@@ -655,6 +699,160 @@ TEST_F(SingleCartesianActionServerTest, PoseExecutionSelectsEachArmAndRestoresAu
   }
   EXPECT_EQ(backend_requests_.load(), 0);
   EXPECT_EQ(switch_requests_.load(), 0);
+}
+
+TEST_F(SingleCartesianActionServerTest, StpikFailureBlocksBothPoseExecutionEntrypointsWithoutWritingToTask)
+{
+  backend_active_.store(true); check_outcome_.store(CheckAction::Result::FAIL);
+  for (bool immediate : {false, true}) {
+    const int before = check_requests_.load();
+    auto handle = sendGoal(poseGoal(immediate)); ASSERT_TRUE(handle);
+    auto result = client_->async_get_result(handle);
+    if (!immediate) {
+      ASSERT_TRUE(waitUntil([this]() {return waiting();}));
+      EXPECT_EQ(check_requests_.load(), before);
+      auto executed = trigger(execute_); ASSERT_TRUE(executed); ASSERT_TRUE(executed->success);
+    }
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    const auto response = result.get(); ASSERT_TRUE(response.result);
+    EXPECT_FALSE(response.result->success);
+    EXPECT_NE(response.result->message.find("COLLISION_CLEARANCE"), std::string::npos);
+    EXPECT_NE(response.result->message.find("left_joint=0.1"), std::string::npos);
+    EXPECT_TRUE(automaticTarget());
+    std::lock_guard<std::mutex> lock(observation_mutex_);
+    EXPECT_TRUE(pose_targets_[0].empty()); EXPECT_TRUE(pose_feedforwards_[0].empty());
+  }
+}
+
+TEST_F(SingleCartesianActionServerTest, StpikDefaultsToEnabledAndReceivesTheGoalTrackingTolerances)
+{
+  EXPECT_TRUE(PlanAction::Goal().use_stpik);
+  backend_active_.store(true);
+  auto request = poseGoal(true);
+  request.tracking_tolerances.tip_path = {0.02, 0.02, 0.21, 0.3, 0.3, 0.3};
+  request.tracking_tolerances.tip_goal = {0.02, 0.02, 0.22, 0.3, 0.3, 0.3};
+  auto handle = sendGoal(request); ASSERT_TRUE(handle);
+  auto result = client_->async_get_result(handle);
+  ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(check_requests_.load(), 2);
+  std::lock_guard<std::mutex> lock(observation_mutex_);
+  EXPECT_DOUBLE_EQ(checked_goal_.path_tolerance[2], 0.21);
+  EXPECT_DOUBLE_EQ(checked_goal_.goal_tolerance[2], 0.22);
+}
+
+TEST_F(SingleCartesianActionServerTest, PoseCanSkipStpikForImmediateAndPendingExecutionWithoutAChecker)
+{
+  backend_active_.store(true); checker_.reset();
+  for (bool immediate : {false, true}) {
+    auto request = poseGoal(immediate); request.use_stpik = false;
+    auto handle = sendGoal(request); ASSERT_TRUE(handle);
+    auto result = client_->async_get_result(handle);
+    if (!immediate) {
+      ASSERT_TRUE(waitUntil([this]() {return waiting("use_stpik=false");}));
+      auto executed = trigger(execute_); ASSERT_TRUE(executed); ASSERT_TRUE(executed->success);
+    }
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(result.get().result->success);
+  }
+  EXPECT_EQ(check_requests_.load(), 0);
+  EXPECT_EQ(backend_requests_.load(), 0); EXPECT_EQ(switch_requests_.load(), 0);
+  std::lock_guard<std::mutex> lock(observation_mutex_);
+  EXPECT_FALSE(pose_targets_[0].empty()); EXPECT_FALSE(pose_feedforwards_[0].empty());
+}
+
+TEST_F(SingleCartesianActionServerTest, StalledReasonAndSimulatedErrorArePublishedInActionFeedback)
+{
+  backend_active_.store(true); check_outcome_.store(CheckAction::Result::FAIL); stalled_check_.store(true);
+  auto handle = sendGoal(poseGoal(true)); ASSERT_TRUE(handle);
+  auto result = client_->async_get_result(handle);
+  ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  const auto response = result.get(); EXPECT_FALSE(response.result->success);
+  EXPECT_NE(response.result->message.find("stalled=position"), std::string::npos);
+  ASSERT_TRUE(waitUntil([this]() {
+    std::lock_guard<std::mutex> lock(observation_mutex_); return stage_ == "stpik_failed";
+  }));
+  std::lock_guard<std::mutex> lock(observation_mutex_);
+  EXPECT_NE(last_feedback_.message.find("orientation_stalled=false"), std::string::npos);
+  EXPECT_NE(last_feedback_.message.find("measured_delta_m=0"), std::string::npos);
+  EXPECT_DOUBLE_EQ(last_feedback_.tip_error[2], 0.00124);
+  EXPECT_TRUE(pose_targets_[0].empty()); EXPECT_TRUE(pose_feedforwards_[0].empty());
+}
+
+TEST_F(SingleCartesianActionServerTest, DisablingStpikPreservesExecutionTrackingChecks)
+{
+  backend_active_.store(true); checker_.reset(); pose_tracks_.store(false);
+  auto request = poseGoal(true); request.use_stpik = false;
+  request.target_pose.pose.position.x = -0.8;
+  request.tracking_tolerances.tip_path = std::vector<double>(6, 0.002);
+  auto handle = sendGoal(request); ASSERT_TRUE(handle);
+  auto result = client_->async_get_result(handle);
+  ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  const auto response = result.get();
+  EXPECT_FALSE(response.result->success);
+  EXPECT_NE(response.result->message.find("Cartesian pose path tracking tolerance violated"), std::string::npos);
+  EXPECT_EQ(check_requests_.load(), 0);
+  EXPECT_TRUE(automaticTarget());
+}
+
+TEST_F(SingleCartesianActionServerTest, StpikUnavailableRetainsThePlanAndRetryChecksAgain)
+{
+  backend_active_.store(true); check_outcome_.store(CheckAction::Result::UNAVAILABLE);
+  auto handle = sendGoal(poseGoal(true)); ASSERT_TRUE(handle);
+  auto result = client_->async_get_result(handle);
+  ASSERT_TRUE(waitUntil([this]() {return waiting("CHECK_UNAVAILABLE");}));
+  EXPECT_NE(result.wait_for(std::chrono::milliseconds(0)), std::future_status::ready);
+  EXPECT_TRUE(automaticTarget());
+  {std::lock_guard<std::mutex> lock(observation_mutex_);
+    EXPECT_TRUE(pose_targets_[0].empty()); EXPECT_TRUE(pose_feedforwards_[0].empty());}
+  check_outcome_.store(CheckAction::Result::SUCCESS);
+  auto executed = trigger(execute_); ASSERT_TRUE(executed); ASSERT_TRUE(executed->success);
+  ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  EXPECT_TRUE(result.get().result->success);
+  EXPECT_EQ(check_requests_.load(), 3);  // failed attempt, simulation, freshness token.
+}
+
+TEST_F(SingleCartesianActionServerTest, StaleStpikTokenBlocksReferencesAndParameterChanges)
+{
+  backend_active_.store(true); stale_check_.store(true);
+  auto handle = sendGoal(poseGoal(true)); ASSERT_TRUE(handle);
+  auto result = client_->async_get_result(handle);
+  ASSERT_TRUE(waitUntil([this]() {return waiting("CHECK_UNAVAILABLE");}));
+  EXPECT_EQ(check_requests_.load(), 2); EXPECT_TRUE(automaticTarget());
+  {std::lock_guard<std::mutex> lock(observation_mutex_);
+    EXPECT_TRUE(pose_targets_[0].empty()); EXPECT_TRUE(pose_feedforwards_[0].empty());}
+  auto canceled = trigger(cancel_); ASSERT_TRUE(canceled);
+  ASSERT_EQ(result.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+}
+
+TEST_F(SingleCartesianActionServerTest, MissingStpikServerRetainsThePlanWithoutTaskWrites)
+{
+  backend_active_.store(true); checker_.reset();
+  auto handle = sendGoal(poseGoal(true)); ASSERT_TRUE(handle);
+  auto result = client_->async_get_result(handle);
+  ASSERT_TRUE(waitUntil([this]() {return waiting("plan retained");}));
+  EXPECT_NE(result.wait_for(std::chrono::milliseconds(0)), std::future_status::ready);
+  EXPECT_EQ(check_requests_.load(), 0); EXPECT_TRUE(automaticTarget());
+  {std::lock_guard<std::mutex> lock(observation_mutex_);
+    EXPECT_TRUE(pose_targets_[0].empty()); EXPECT_TRUE(pose_feedforwards_[0].empty());}
+  auto canceled = trigger(cancel_); ASSERT_TRUE(canceled);
+  ASSERT_EQ(result.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+}
+
+TEST_F(SingleCartesianActionServerTest, CancelDuringStpikCancelsTheCheckerAndPublishesNoMotionReferences)
+{
+  backend_active_.store(true); hold_check_.store(true);
+  auto handle = sendGoal(poseGoal(true)); ASSERT_TRUE(handle);
+  auto result = client_->async_get_result(handle);
+  ASSERT_TRUE(waitUntil([this]() {return check_requests_.load() == 1;}));
+  EXPECT_TRUE(automaticTarget());
+  auto canceled = trigger(cancel_); ASSERT_TRUE(canceled);
+  ASSERT_EQ(result.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+  EXPECT_FALSE(result.get().result->success);
+  ASSERT_TRUE(waitUntil([this]() {return check_cancels_.load() > 0;}));
+  EXPECT_TRUE(automaticTarget());
+  std::lock_guard<std::mutex> lock(observation_mutex_);
+  EXPECT_TRUE(pose_targets_[0].empty()); EXPECT_TRUE(pose_feedforwards_[0].empty());
 }
 
 TEST_F(SingleCartesianActionServerTest, PoseExecutionPreservesInitiallyDisabledAutomaticTarget)

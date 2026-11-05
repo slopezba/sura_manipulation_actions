@@ -24,7 +24,7 @@ El nodo principal es un `LifecycleNode` que expone una action propia, `PlanJoint
 - Comprueba limites articulares y colisiones antes de planificar.
 - Planifica con OMPL para los grupos MoveIt `alpha_left` o `alpha_right`.
 - Publica la trayectoria planificada para verla en RViz.
-- Cambia automaticamente del controlador de velocidad al controlador de trayectoria del brazo seleccionado.
+- Usa el controlador de trayectoria o la tarea de prioridad que ya esté activa, sin cambiar controladores.
 - Ejecuta la trayectoria inmediatamente o la deja pendiente hasta recibir una confirmacion por servicio.
 
 ## Compilar
@@ -345,32 +345,22 @@ ros2 topic echo /cirtesub/manipulation/markers --once
 
 ## Controladores necesarios
 
-Antes de ejecutar, deben existir los controladores de `ros2_control` y el `controller_manager` debe estar disponible en:
+Para `PlanJointTrajectory`, activa previamente el controlador y la tarea que
+correspondan al backend elegido. La acción no configura, activa ni desactiva
+controladores del brazo o de la base. Si el servidor de trayectoria no está
+disponible o rechaza el objetivo, la acción termina con error.
 
-```text
-/cirtesub/controller/controller_manager/list_controllers
-/cirtesub/controller/controller_manager/switch_controller
-```
-
-Controladores esperados por defecto:
-
-```text
-alpha_left_forward_velocity_controller
-alpha_left_gripper_velocity_controller
-alpha_left_joint_trajectory_controller
-alpha_right_forward_velocity_controller
-alpha_right_gripper_velocity_controller
-alpha_right_joint_trajectory_controller
-```
-
-Action servers de trayectoria esperados:
+Con `execution_backend:=controller`, los action servers predeterminados son:
 
 ```text
 /cirtesub/alpha/controller/alpha_left_joint_trajectory_controller/follow_joint_trajectory
 /cirtesub/alpha/controller/alpha_right_joint_trajectory_controller/follow_joint_trajectory
 ```
 
-El servidor cambia automaticamente el brazo seleccionado a modo trayectoria: activa el `joint_trajectory_controller` y desactiva el `forward_velocity_controller` si estaba activo.
+Con `execution_backend:=task`, debe estar activo `task_priority_controller` y
+habilitada la tarea `left_joint_trajectory` o `right_joint_trajectory` según el
+brazo. Este controlador también puede enviar velocidades a la base: prepara el
+control de la base de forma coherente antes de ejecutar el movimiento.
 
 ## Topics principales
 
@@ -416,7 +406,6 @@ right_group_name: alpha_right
 default_planning_time: 5.0
 default_goal_tolerance: 0.02
 controller_wait_timeout: 5.0
-controller_switch_timeout: 2.0
 execution_feedback_rate: 10.0
 current_state_timeout: 2.0
 planning_scene_publish_rate: 10.0

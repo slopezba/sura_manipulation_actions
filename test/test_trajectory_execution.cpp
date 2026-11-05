@@ -258,12 +258,17 @@ TEST_F(TrajectoryTransportTest, SingleTaskAdmissionRejectionIsRetryable)
 TEST_F(TrajectoryTransportTest, JointTaskReceivesCompleteTrajectoryAndImmediateStamp)
 {
   options_.use_common_start_stamp = false;
+  auto planned = trajectory();
+  planned.header.stamp.sec = 1;  // An old plan must start when received, not at this time.
+  first_->acceptance_delay_ms = 100;
   first_->finish = true;
   const auto result = transport_->execute(
-    trajectory(), {{"joint_task", first_->action_name, {}}}, options_);
+    planned, {{"joint_task", first_->action_name, {}}}, options_);
   EXPECT_TRUE(result.success) << result.message;
   const auto sent = first_->trajectory();
-  EXPECT_EQ(sent.joint_names, trajectory().joint_names);
+  EXPECT_EQ(sent.joint_names, planned.joint_names);
+  ASSERT_EQ(sent.points.size(), planned.points.size());
+  EXPECT_EQ(sent.points.back().time_from_start.sec, planned.points.back().time_from_start.sec);
   EXPECT_EQ(sent.header.stamp.sec, 0);
   EXPECT_EQ(sent.header.stamp.nanosec, 0u);
 }

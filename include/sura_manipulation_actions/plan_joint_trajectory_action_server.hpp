@@ -10,8 +10,6 @@
 #include <unordered_map>
 #include <vector>
 
-#include "controller_manager_msgs/srv/list_controllers.hpp"
-#include "controller_manager_msgs/srv/switch_controller.hpp"
 #include "control_msgs/action/follow_joint_trajectory.hpp"
 #include "moveit/planning_pipeline/planning_pipeline.h"
 #include "moveit/planning_scene/planning_scene.h"
@@ -42,8 +40,6 @@ public:
   using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
   using GoalHandleFollowJointTrajectory =
     rclcpp_action::ClientGoalHandle<FollowJointTrajectory>;
-  using ListControllers = controller_manager_msgs::srv::ListControllers;
-  using SwitchController = controller_manager_msgs::srv::SwitchController;
   using Trigger = std_srvs::srv::Trigger;
 
   explicit PlanJointTrajectoryActionServer(
@@ -51,8 +47,6 @@ public:
   ~PlanJointTrajectoryActionServer() override;
 
 private:
-  friend class ControllerSwitchTest;
-
   struct ArmConfig
   {
     std::string canonical_name;
@@ -151,8 +145,6 @@ private:
     const std::string & feedback_message,
     std::string & error_message,
     double & final_error_norm);
-  bool switchControllersForArm(const ArmConfig & arm, std::string & error_message);
-  bool switchControllersForTaskExecution(std::string & error_message);
   bool startPendingExecution(std::string & message);
   bool cancelPendingOrActive(const std::string & message, std::string & response_message);
   void finishPendingActionCancel(
@@ -188,10 +180,6 @@ private:
 
   rclcpp_action::Server<PlanJointTrajectory>::SharedPtr action_server_;
   std::shared_ptr<TrajectoryExecutor> trajectory_executor_;
-  rclcpp::Client<ListControllers>::SharedPtr list_controllers_client_;
-  rclcpp::Client<SwitchController>::SharedPtr switch_controller_client_;
-  rclcpp::Client<ListControllers>::SharedPtr vehicle_list_client_;
-  rclcpp::Client<SwitchController>::SharedPtr vehicle_switch_client_;
   rclcpp::Service<Trigger>::SharedPtr execute_service_;
   rclcpp::Service<Trigger>::SharedPtr cancel_service_;
   rclcpp::Publisher<moveit_msgs::msg::DisplayTrajectory>::SharedPtr display_trajectory_pub_;
@@ -231,16 +219,6 @@ private:
   std::string right_group_name_;
   std::string left_controller_action_;
   std::string right_controller_action_;
-  std::string controller_list_service_;
-  std::string controller_switch_service_;
-  std::string vehicle_controller_list_service_;
-  std::string vehicle_controller_switch_service_;
-  std::string body_velocity_controller_;
-  std::string left_velocity_controller_;
-  std::string right_velocity_controller_;
-  std::string left_trajectory_controller_;
-  std::string right_trajectory_controller_;
-  std::string task_priority_controller_;
   std::string execute_service_name_;
   std::string cancel_service_name_;
   std::string execution_backend_;
@@ -261,7 +239,6 @@ private:
   double execution_feedback_rate_{10.0};
   double current_state_timeout_{2.0};
   double planning_scene_publish_rate_{10.0};
-  double controller_switch_timeout_{2.0};
 };
 
 }  // namespace sura_manipulation_actions

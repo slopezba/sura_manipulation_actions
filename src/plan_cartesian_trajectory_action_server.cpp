@@ -133,9 +133,10 @@ bool PlanCartesianTrajectoryActionServer::loadConfiguration(std::string & error)
   pose_angular_velocity_ = parameter<double>(*this, "pose.max_angular_velocity", 0.5);
   pose_linear_acceleration_ = parameter<double>(*this, "pose.max_linear_acceleration", 0.4);
   pose_angular_acceleration_ = parameter<double>(*this, "pose.max_angular_acceleration", 0.2);
+  stpik_timeout_ = parameter<double>(*this, "pose.stpik_timeout", 35.0);
   const std::vector<double> positive{planning_time_, cartesian_step_, state_timeout_, state_max_age_,
     start_joint_tolerance_, start_prismatic_tolerance_, base_position_tolerance_, base_orientation_tolerance_,
-    pose_linear_velocity_, pose_angular_velocity_, pose_linear_acceleration_, pose_angular_acceleration_};
+    pose_linear_velocity_, pose_angular_velocity_, pose_linear_acceleration_, pose_angular_acceleration_, stpik_timeout_};
   if (std::any_of(positive.begin(), positive.end(), [](double value) {return !std::isfinite(value) || value <= 0.0;})) {
     error = "Planning, state, and execution tolerance defaults must be finite and positive"; return false;
   }
@@ -253,6 +254,10 @@ bool PlanCartesianTrajectoryActionServer::loadConfiguration(std::string & error)
       feedforward_prefix.resize(feedforward_prefix.size() - 7);
     } else {feedforward_prefix = pose_prefix;}
     pose.feedforward_topic = parameter<std::string>(*this, prefix + "pose_feedforward_topic", feedforward_prefix + "/feedforward");
+    const auto tasks_separator = pose.target_topic.rfind("/tasks/");
+    pose.check_action = parameter<std::string>(*this, prefix + "pose_stpik_action",
+      (tasks_separator == std::string::npos ? pose_namespace + "/task_priority" :
+      pose.target_topic.substr(0, tasks_separator)) + "/check_cartesian_trajectory");
     if (pose.controller_node.empty() || pose.task_id.empty() || pose.target_topic.empty() || pose.feedforward_topic.empty()) {
       error = "Pose task endpoints cannot be empty: " + name; return false;
     }
@@ -290,6 +295,7 @@ PlanCartesianTrajectoryActionServer::on_configure(const rclcpp_lifecycle::State 
     pose_tf_buffer_ = std::make_unique<tf2_ros::Buffer>(moveit_node_->get_clock());
     pose_tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*pose_tf_buffer_, moveit_node_, false);
     for (auto & entry : pose_endpoints_) {
+      entry.second.checker = rclcpp_action::create_client<CheckAction>(moveit_node_, entry.second.check_action);
       entry.second.target = moveit_node_->create_publisher<geometry_msgs::msg::PoseStamped>(
         entry.second.target_topic, rclcpp::QoS(1).reliable());
       entry.second.feedforward = moveit_node_->create_publisher<geometry_msgs::msg::TwistStamped>(

@@ -43,6 +43,8 @@
     pose.max_angular_velocity: 0.5
     pose.max_linear_acceleration: 0.4
     pose.max_angular_acceleration: 0.2
+    # Used for Pose execution when the goal has use_stpik=true.
+    pose.stpik_timeout: 35.0
     planning.base_joint_name: world_joint
     planning.base_velocity_limits: [1.0, 1.0, 1.0, 0.5, 0.5, 0.5]
     planning.base_acceleration_limits: [0.4, 0.4, 0.4, 0.2, 0.2, 0.2]
@@ -107,6 +109,7 @@
     # The bringup remaps pose topics to the public controller namespace.
     arms.alpha_left.pose_target_topic: /${robot_namespace}/controller/task_priority/tasks/left_pose/target
     arms.alpha_left.pose_feedforward_topic: /${robot_namespace}/controller/task_priority/tasks/left_pose/feedforward
+    arms.alpha_left.pose_stpik_action: /${robot_namespace}/controller/task_priority/check_cartesian_trajectory
     arms.alpha_right.task_action: /${robot_namespace}/controller/task_priority/tasks/right_joint_trajectory/follow_joint_trajectory
     arms.alpha_right.task_controller_name: task_priority_controller
     arms.alpha_right.task_manager_service: /${robot_namespace}/alpha/controller/controller_manager/list_controllers
@@ -114,3 +117,4 @@
     arms.alpha_right.pose_controller_node: /${robot_namespace}/alpha/controller/task_priority_controller
     arms.alpha_right.pose_target_topic: /${robot_namespace}/controller/task_priority/tasks/right_pose/target
     arms.alpha_right.pose_feedforward_topic: /${robot_namespace}/controller/task_priority/tasks/right_pose/feedforward
+    arms.alpha_right.pose_stpik_action: /${robot_namespace}/controller/task_priority/check_cartesian_trajectory

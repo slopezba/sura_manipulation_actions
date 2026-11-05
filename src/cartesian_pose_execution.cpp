@@ -6,6 +6,7 @@
 #include <future>
 #include <stdexcept>
 #include <thread>
+#include <sstream>
 
 #include "rcl_interfaces/msg/parameter_type.hpp"
 #include "rcl_interfaces/srv/get_parameters.hpp"
@@ -164,7 +165,9 @@ void PlanCartesianTrajectoryActionServer::planPoseGoal(const std::shared_ptr<Pen
     desired.header.stamp = now();
     for (auto & point : desired.poses) {point.header.stamp = desired.header.stamp;}
     pending->views = visualization_->publishPosePath(desired);
-    retain(pending, "Geometric tool path published; waiting for execute (no IK or collision validation)");
+    retain(pending, pending->handle->get_goal()->use_stpik ?
+      "Geometric tool path published; STPIK validation will run when execution is requested" :
+      "Geometric tool path published; use_stpik=false; waiting for Pose execution");
     if (canceled()) {finish(pending, false, "Pose planning canceled"); return;}
     if (pending->handle->get_goal()->execute && !canceled()) {
       {std::lock_guard<std::mutex> lock(mutex_);
@@ -218,6 +221,104 @@ bool PlanCartesianTrajectoryActionServer::poseBackendReady(
   return true;
 }
 
+bool PlanCartesianTrajectoryActionServer::checkPoseTrajectory(
+  const PendingPlan & pending, uint64_t & validation_id, bool & retryable, std::string & error)
+{
+  retryable = true;
+  const auto client = pose_endpoints_.at(pending.arm.name).checker;
+  const auto canceled = [this, &pending]() {
+      return !rclcpp::ok() || stopped_.load() || !execution_active_.load() ||
+        pending.handle->is_canceling() || !pending.handle->is_active();
+    };
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(stpik_timeout_);
+  while (!client->action_server_is_ready()) {
+    if (canceled()) {error = "STPIK canceled"; return false;}
+    if (std::chrono::steady_clock::now() >= deadline) {
+      error = "STPIK checker unavailable: " + pose_endpoints_.at(pending.arm.name).check_action; return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  CheckAction::Goal goal;
+  goal.trajectory = pending.pose_path.descriptor(reference_frame_);
+  goal.task_id = pose_endpoints_.at(pending.arm.name).task_id;
+  goal.tip_frame = pending.arm.tip_frame;
+  const Eigen::Quaterniond tolerance(pending.goal.world_from_tolerance.rotation());
+  goal.tolerance_orientation.x = tolerance.x(); goal.tolerance_orientation.y = tolerance.y();
+  goal.tolerance_orientation.z = tolerance.z(); goal.tolerance_orientation.w = tolerance.w();
+  std::copy_n(pending.tracking_tolerances.tip_path.begin(), 6, goal.path_tolerance.begin());
+  std::copy_n(pending.tracking_tolerances.tip_goal.begin(), 6, goal.goal_tolerance.begin());
+  goal.goal_time_tolerance = rclcpp::Duration(pending.tracking_tolerances.goal_time_tolerance).seconds();
+  goal.validation_id = validation_id;
+  // Handle late acceptance too, including cancellation while send_goal is in flight.
+  struct Dispatch {std::mutex mutex; bool canceled = false; CheckHandle::SharedPtr handle;};
+  auto dispatch = std::make_shared<Dispatch>();
+  rclcpp_action::Client<CheckAction>::SendGoalOptions options;
+  options.goal_response_callback = [dispatch, client](CheckHandle::SharedPtr handle) {
+      bool cancel = false;
+      {std::scoped_lock lock(dispatch->mutex); dispatch->handle = handle; cancel = dispatch->canceled;}
+      if (cancel && handle) {try {client->async_cancel_goal(handle);} catch (const std::exception &) {}}
+    };
+  const auto cancel_check = [&]() {
+      CheckHandle::SharedPtr handle;
+      {std::scoped_lock lock(dispatch->mutex); dispatch->canceled = true; handle = dispatch->handle;}
+      if (handle) {try {client->async_cancel_goal(handle);} catch (const std::exception &) {}}
+    };
+  try {
+    auto accepted = client->async_send_goal(goal, options);
+    while (accepted.wait_for(std::chrono::milliseconds(10)) != std::future_status::ready) {
+      if (canceled() || std::chrono::steady_clock::now() >= deadline) {
+        cancel_check(); error = "STPIK request canceled or timed out; feasibility unknown"; return false;
+      }
+    }
+    const auto handle = accepted.get();
+    if (!handle) {error = "STPIK request rejected: checker may be busy"; return false;}
+    auto result = client->async_get_result(handle);
+    while (result.wait_for(std::chrono::milliseconds(10)) != std::future_status::ready) {
+      if (canceled() || std::chrono::steady_clock::now() >= deadline) {
+        cancel_check(); error = "STPIK simulation canceled or timed out; feasibility unknown"; return false;
+      }
+    }
+    const auto wrapped = result.get();
+    if (!wrapped.result) {error = "STPIK returned no diagnostic"; return false;}
+    const auto & report = *wrapped.result;
+    if (wrapped.code == rclcpp_action::ResultCode::SUCCEEDED &&
+      report.outcome == CheckAction::Result::SUCCESS && report.validation_id != 0)
+    {validation_id = report.validation_id; return true;}
+    retryable = report.outcome != CheckAction::Result::FAIL;
+    std::ostringstream detail;
+    detail << "STPIK " << report.code << " at t=" << report.time_from_start << " s: " << report.message;
+    if (!report.task_id.empty()) {detail << "; task=" << report.task_id;}
+    if (!report.constraint.empty()) {detail << "; constraint=" << report.constraint;}
+    detail << "; q=[";
+    for (size_t i = 0; i < report.joint_positions.size(); ++i) {
+      if (i) {detail << ", ";}
+      if (i < report.joint_names.size()) {detail << report.joint_names[i] << '=';}
+      detail << report.joint_positions[i];
+    }
+    detail << "]; tip_error=[";
+    for (size_t i = 0; i < report.tracking_error.size(); ++i) {
+      if (i) {detail << ", ";} detail << report.tracking_error[i];
+    }
+    detail << "]; min_clearance=" << report.minimum_clearance
+           << "; max_velocity_ratio=" << report.maximum_velocity_ratio;
+    error = detail.str();
+    if (report.outcome == CheckAction::Result::FAIL && !canceled()) {
+      auto output = std::make_shared<Action::Feedback>();
+      output->progress = 0.8F;
+      output->current_stage = "stpik_failed";
+      output->message = error;
+      std::copy(report.tracking_error.begin(), report.tracking_error.end(), output->tip_error.begin());
+      try {pending.handle->publish_feedback(output);}
+      catch (const std::exception & exception) {
+        RCLCPP_DEBUG(get_logger(), "STPIK failure feedback unavailable: %s", exception.what());
+      }
+    }
+    return false;
+  } catch (const std::exception & exception) {
+    cancel_check(); error = "STPIK communication failed: " + std::string(exception.what()); return false;
+  }
+}
+
 void PlanCartesianTrajectoryActionServer::executePosePlan(const std::shared_ptr<PendingPlan> & pending)
 {
   std::string error;
@@ -244,6 +345,31 @@ void PlanCartesianTrajectoryActionServer::executePosePlan(const std::shared_ptr<
       return;
     }
     if (!validatePosePending(*pending, error)) {finish(pending, false, error); return;}
+    if (pending->handle->get_goal()->use_stpik) {
+      // This gate precedes ALL target/feedforward publications and parameter writes.
+      uint64_t validation_id = 0;
+      bool retryable = false;
+      feedback(pending->handle, 0.8F, "stpik_check", "Validating the trajectory with isolated Task Priority simulation");
+      if (!checkPoseTrajectory(*pending, validation_id, retryable, error)) {
+        if (canceled()) {finish(pending, false, "Pose execution canceled during STPIK");}
+        else if (retryable) {retain(pending, error + "; plan retained; retry execution");}
+        else {finish(pending, false, error);}
+        return;
+      }
+      // The hardware and effective task settings can change while checking.
+      if (!poseBackendReady(*pending, auto_update, error)) {
+        if (canceled()) {finish(pending, false, "Pose execution canceled");}
+        else {retain(pending, error + "; plan retained; retry execution");}
+        return;
+      }
+      if (!validatePosePending(*pending, error)) {finish(pending, false, error); return;}
+      if (!checkPoseTrajectory(*pending, validation_id, retryable, error)) {
+        if (canceled()) {finish(pending, false, "Pose execution canceled during STPIK revalidation");}
+        else if (retryable) {retain(pending, error + "; plan retained; retry execution");}
+        else {finish(pending, false, error);}
+        return;
+      }
+    }
     setter = moveit_node_->create_client<SetParameters>(endpoint.controller_node + "/set_parameters_atomically");
     if (canceled()) {throw std::runtime_error("Pose execution canceled");}
     if (!readTipPose(*pending, measured, error)) {throw std::runtime_error(error);}

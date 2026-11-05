@@ -1,0 +1,36 @@
+# Read-only offline check. No motion commands are published by this action.
+CartesianPoseTrajectory trajectory
+string task_id
+string tip_frame
+geometry_msgs/Quaternion tolerance_orientation
+# Exact Cartesian tracking tolerances supplied by the planning goal; no host error cap.
+float64[6] path_tolerance
+float64[6] goal_tolerance
+float64 goal_time_tolerance
+# Zero runs a simulation; nonzero revalidates a previous successful snapshot.
+uint64 validation_id
+---
+uint8 SUCCESS=0
+uint8 FAIL=1
+uint8 UNAVAILABLE=2
+uint8 CANCELED=3
+uint8 outcome
+string code
+string message
+float64 time_from_start
+string[] joint_names
+float64[] joint_positions
+geometry_msgs/Pose base_pose
+float64[6] tracking_error
+string task_id
+# A stall identifies position, orientation or position_and_orientation here;
+# message contains the demand, achieved movement and error reduction for each group.
+string constraint
+float64 minimum_clearance
+float64 maximum_velocity_ratio
+float64 minimum_singular_value
+uint64 validation_id
+---
+float32 progress
+float64 time_from_start
+string message

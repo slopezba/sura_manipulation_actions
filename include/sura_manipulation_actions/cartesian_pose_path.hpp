@@ -8,6 +8,7 @@
 #include <string>
 
 #include "nav_msgs/msg/path.hpp"
+#include "sura_manipulation_actions/msg/cartesian_pose_trajectory.hpp"
 
 namespace sura_manipulation_actions
 {
@@ -99,6 +100,55 @@ public:
   }
 
   double duration() const {return duration_;}
+
+  msg::CartesianPoseTrajectory descriptor(const std::string & frame) const
+  {
+    msg::CartesianPoseTrajectory out;
+    out.header.frame_id = frame;
+    const auto fill = [](geometry_msgs::msg::Pose & p, const Eigen::Isometry3d & t,
+        const Eigen::Quaterniond & q) {
+        p.position.x = t.translation().x(); p.position.y = t.translation().y();
+        p.position.z = t.translation().z();
+        p.orientation.x = q.x(); p.orientation.y = q.y();
+        p.orientation.z = q.z(); p.orientation.w = q.w();
+      };
+    fill(out.start_pose, start_, start_orientation_);
+    fill(out.target_pose, target_, target_orientation_);
+    out.duration = duration_;
+    return out;
+  }
+
+  // Deserialize without recomputing timing or choosing a different arc at pi.
+  bool initTimed(const msg::CartesianPoseTrajectory & input, std::string & error)
+  {
+    const auto decode = [](const geometry_msgs::msg::Pose & p,
+        Eigen::Isometry3d & t, Eigen::Quaterniond & q) {
+        t.setIdentity(); t.translation() << p.position.x, p.position.y, p.position.z;
+        q = Eigen::Quaterniond(p.orientation.w, p.orientation.x, p.orientation.y, p.orientation.z);
+        if (!t.translation().allFinite() || !q.coeffs().allFinite() ||
+          std::abs(q.norm() - 1.0) > 1e-12) {return false;}
+        // Preserve exact coefficients: renormalizing again can reverse SLERP's
+        // sign choice through roundoff at an exactly pi rotation.
+        t.linear() = q.toRotationMatrix(); return true;
+      };
+    if (!decode(input.start_pose, start_, start_orientation_) ||
+      !decode(input.target_pose, target_, target_orientation_) ||
+      !std::isfinite(input.duration) || input.duration < 0.0 ||
+      start_orientation_.dot(target_orientation_) < 0.0)
+    {error = "Invalid timed Cartesian profile or signed quaternion arc"; return false;}
+    const Eigen::Quaterniond relative = start_orientation_.conjugate() * target_orientation_;
+    const double angle = start_.rotation().isApprox(target_.rotation(), 1e-15) ? 0.0 :
+      2.0 * std::atan2(relative.vec().norm(), std::abs(relative.w()));
+    angular_displacement_.setZero();
+    if (angle > 0.0) {
+      angular_displacement_ = start_orientation_ * (relative.vec() * (angle / relative.vec().stableNorm()));
+    }
+    if (input.duration == 0.0 &&
+      ((start_.translation() - target_.translation()).norm() > 1e-12 || angle > 1e-12))
+    {error = "A moving Cartesian profile needs a positive duration"; return false;}
+    duration_ = input.duration; waypoint_count_ = duration_ == 0.0 ? 1U : 2U;
+    error.clear(); return true;
+  }
 
   Eigen::Isometry3d sample(double elapsed) const
   {

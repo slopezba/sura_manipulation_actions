@@ -5,8 +5,9 @@
 Selecciona **Pose** en la pestaña Cartesian de RQT, o envía un goal con
 `execution_backend: pose`. Este modo genera únicamente el recorrido del efector:
 posición lineal, orientación SLERP por el arco corto y un perfil temporal quíntico
-que empieza y termina en reposo. No calcula IK ni valida colisiones o
-alcanzabilidad antes de ejecutar. `desired_path` contiene el recorrido geométrico;
+que empieza y termina en reposo. La planificación publica el recorrido sin IK;
+al solicitar ejecución con `use_stpik: true` (por defecto), STPIK comprueba seguimiento
+y seguridad con una copia de la jerarquía del controlador. `desired_path` contiene el recorrido geométrico;
 `path`, `joint_trajectory`, `base_trajectory` y `base_path` quedan vacíos.
 
 La referencia se publica a 100 Hz en los topics existentes de `left_pose` o
@@ -71,6 +72,16 @@ feedforward y se restaura `auto_update_target_pose`; si se pierde TF se conserva
 la última medida válida. Si falla la restauración, el resultado lo indica.
 El envío por topics conserva la última referencia si desaparece el proceso del
 planificador. Los modos **Controller** y **Task** mantienen su ejecución existente.
+
+Con **Use STPIK** activado en RQT (`use_stpik: true` en el goal), antes de ejecutar
+**Pose** se valida el perfil mediante simulación STPIK aislada
+de la jerarquía Task Priority efectiva. Un fallo rechaza el plan; ausencia del
+checker, timeout o snapshot obsoleto conservan el plan para reintentar. El check
+precede a cualquier publicación o cambio en la tarea real. Consulta
+[parámetros, criterios y diagnósticos de STPIK](stpik_check.md).
+Las tolerancias de seguimiento se toman del goal, sin un límite cartesiano adicional
+en el controlador. Con `use_stpik: false` se omite el check previo y se mantiene
+la supervisión del tracking durante la ejecución.
 
 ## Planificación con trayectorias de base y articulaciones
 
